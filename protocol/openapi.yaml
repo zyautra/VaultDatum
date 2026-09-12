@@ -1,0 +1,32 @@
+openapi: 3.1.1
+info:
+  title: VaultDatum API
+  version: 0.1.0
+  description: |
+    The protocol contract for the VaultDatum authoritative server and Obsidian
+    client. Synchronization endpoints are added only after their behavior is
+    designed.
+servers:
+  - url: http://localhost:8080
+paths:
+  /health:
+    get:
+      operationId: getHealth
+      summary: Report server availability
+      responses:
+        '200':
+          description: Server is available
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+components:
+  schemas:
+    HealthResponse:
+      type: object
+      required:
+        - status
+      properties:
+        status:
+          type: string
+          const: ok

@@ -1,0 +1,11 @@
+plugins {
+    id "io.quarkus" version "3.33.3.2" apply false
+}
+
+group = "io.vaultdatum"
+version = "0.1.0-SNAPSHOT"
+
+subprojects {
+    group = rootProject.group
+    version = rootProject.version
+}

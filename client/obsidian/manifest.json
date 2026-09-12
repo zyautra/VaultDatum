@@ -1,0 +1,9 @@
+{
+  "id": "vaultdatum",
+  "name": "VaultDatum",
+  "version": "0.1.0",
+  "minAppVersion": "1.6.0",
+  "description": "Reliable, local-first synchronization with a VaultDatum server.",
+  "author": "VaultDatum",
+  "isDesktopOnly": false
+}

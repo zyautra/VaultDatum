@@ -1,0 +1,64 @@
+name: Verify
+
+on:
+  pull_request:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  server:
+    name: Server
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '25'
+      - uses: gradle/actions/setup-gradle@v4
+      - run: ./gradlew check --no-daemon
+
+  native-container:
+    name: Native container
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '25'
+      - uses: gradle/actions/setup-gradle@v4
+      - run: >-
+          ./gradlew :server:build
+          -Dquarkus.native.enabled=true
+          -Dquarkus.native.container-build=true
+          -Dquarkus.native.container-runtime=docker
+          -Dquarkus.package.jar.enabled=false
+          --no-daemon
+      - run: docker build -f server/src/main/docker/Dockerfile.native -t vaultdatum-server:native-test server
+      - run: docker run --detach --rm --name vaultdatum-native-test -p 18080:8080 vaultdatum-server:native-test
+      - run: curl --fail --retry 10 --retry-connrefused --retry-delay 1 http://127.0.0.1:18080/health
+      - if: always()
+        run: docker stop vaultdatum-native-test || true
+
+  obsidian-client:
+    name: Obsidian client
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: client/obsidian
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: client/obsidian/package-lock.json
+      - run: npm ci
+      - run: npm run check
+      - run: npm run lint
+      - run: npm run format:check
+      - run: npm run build

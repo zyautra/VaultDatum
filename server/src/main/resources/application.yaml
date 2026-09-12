@@ -1,0 +1,16 @@
+quarkus:
+  application:
+    name: vaultdatum-server
+  http:
+    port: 8080
+  datasource:
+    db-kind: other
+    jdbc:
+      driver: org.sqlite.JDBC
+      url: ${VAULTDATUM_DATABASE_URL:jdbc:sqlite:vaultdatum.db}
+    devservices:
+      enabled: false
+    health:
+      enabled: false
+  flyway:
+    migrate-at-start: false

@@ -1,0 +1,26 @@
+{
+  "name": "vaultdatum-obsidian",
+  "version": "0.1.0",
+  "private": true,
+  "description": "VaultDatum synchronization client for Obsidian",
+  "type": "module",
+  "scripts": {
+    "build": "node esbuild.config.mjs production",
+    "check": "tsc --noEmit",
+    "dev": "node esbuild.config.mjs",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "lint": "eslint src",
+    "test": "npm run check"
+  },
+  "devDependencies": {
+    "@types/node": "22.20.2",
+    "@eslint/js": "10.0.1",
+    "esbuild": "0.28.2",
+    "eslint": "10.10.0",
+    "obsidian": "1.13.1",
+    "prettier": "3.9.6",
+    "typescript-eslint": "8.70.0",
+    "typescript": "6.0.3"
+  }
+}
