@@ -322,6 +322,74 @@ async function retriesAnInFlightCreateAfterAStoreRestart(): Promise<void> {
     restartedStore.close();
 }
 
+async function continuesPullingUnrelatedPathsAfterAConflict(): Promise<void> {
+    const conflictPath = "notes/conflicted.md";
+    const localConflict = bytes("Local conflicting content");
+    const remoteConflict = bytes("Remote conflicting content");
+    const cleanPath = "notes/clean.md";
+    const cleanContent = bytes("Remote clean content");
+    const store = await ClientStore.open(
+        `test-conflict-isolation-${crypto.randomUUID()}`,
+    );
+    const vault = new MemoryVault();
+    await vault.writeFile(conflictPath, localConflict);
+    const changes: readonly RemoteChange[] = [
+        {
+            revision: 1,
+            type: "CREATE",
+            operationId: `OP-${crypto.randomUUID()}`,
+            actor: { type: "CLIENT", clientId: "C-remote-client" },
+            effects: [
+                {
+                    path: conflictPath,
+                    entryType: "FILE",
+                    state: "PRESENT",
+                    contentHash: await contentHash(remoteConflict),
+                    size: remoteConflict.byteLength,
+                },
+            ],
+        },
+        {
+            revision: 2,
+            type: "CREATE",
+            operationId: `OP-${crypto.randomUUID()}`,
+            actor: { type: "CLIENT", clientId: "C-remote-client" },
+            effects: [
+                {
+                    path: cleanPath,
+                    entryType: "FILE",
+                    state: "PRESENT",
+                    contentHash: await contentHash(cleanContent),
+                    size: cleanContent.byteLength,
+                },
+            ],
+        },
+    ];
+    const sync = new CreateSync(
+        store,
+        new HistoryTransport(cleanContent, changes),
+        vault,
+        () => "https://vaultdatum.test",
+    );
+
+    const summary = await sync.sync();
+
+    assert.deepEqual(summary, {
+        committed: 0,
+        conflicted: 1,
+        offline: false,
+        vaultMismatch: false,
+    });
+    assert.equal(
+        await vault.hash(conflictPath),
+        await contentHash(localConflict),
+    );
+    assert.equal(await vault.hash(cleanPath), await contentHash(cleanContent));
+    assert.equal(await store.hasConflict(conflictPath), true);
+    assert.equal((await store.syncState()).serverCursor, 2);
+    store.close();
+}
+
 class DownloadTransport implements ContentTransport {
     public constructor(private readonly content: ArrayBuffer) {}
 
@@ -629,3 +697,4 @@ await appliesARemoteDeleteToAMatchingReplica();
 await queuesModifyThenDeleteAgainstTheSameReplicaBase();
 await pullsTheLatestContentAfterAnOwnIntermediateChange();
 await retriesAnInFlightCreateAfterAStoreRestart();
+await continuesPullingUnrelatedPathsAfterAConflict();
