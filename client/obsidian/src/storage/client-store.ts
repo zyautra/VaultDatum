@@ -441,6 +441,23 @@ export class ClientStore {
         await transactionDone(transaction);
     }
 
+    public async replaceConflictWithDelete(
+        pending: PendingDelete,
+    ): Promise<void> {
+        const replaced = await this.pendingForPath(pending.path);
+        const conflicts = await this.conflictsForPath(pending.path);
+        const transaction = this.database.transaction(
+            [CONFLICT_STORE, PENDING_STORE, ARTIFACT_STORE],
+            "readwrite",
+        );
+        this.discardPendingInTransaction(transaction, replaced);
+        for (const conflict of conflicts) {
+            transaction.objectStore(CONFLICT_STORE).delete(conflict.conflictId);
+        }
+        transaction.objectStore(PENDING_STORE).put(pending);
+        await transactionDone(transaction);
+    }
+
     public async recordRemoteConflict(
         conflict: RemoteConflict,
         serverState: ReplicaEntry,

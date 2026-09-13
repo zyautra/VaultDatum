@@ -521,6 +521,64 @@ async function explicitlyResolvesAConflictByApplyingTheLocalVersion(): Promise<v
     store.close();
 }
 
+async function explicitlyResolvesAConflictByKeepingTheLocalDeletion(): Promise<void> {
+    const path = "notes/keep-deleted.md";
+    const priorHash = await contentHash(bytes("Prior content"));
+    const remoteContent = bytes("Server recreated content");
+    const remoteHash = await contentHash(remoteContent);
+    const discarded: PendingDelete = {
+        operationId: `OP-${crypto.randomUUID()}`,
+        clientId: "C-local-client",
+        type: "DELETE",
+        path,
+        baseRevision: 2,
+        baseContentHash: priorHash,
+        createdAt: new Date().toISOString(),
+        status: "READY",
+    };
+    const store = await ClientStore.open(
+        `test-keep-deleted-resolution-${crypto.randomUUID()}`,
+    );
+    const vault = new MemoryVault();
+    await store.saveDelete(discarded);
+    const apply = new RemoteApply(
+        store,
+        new DownloadTransport(remoteContent),
+        vault,
+    );
+
+    await apply.integrateChange("https://vaultdatum.test", {
+        revision: 9,
+        type: "CREATE",
+        operationId: `OP-${crypto.randomUUID()}`,
+        actor: { type: "CLIENT", clientId: "C-remote-client" },
+        effects: [
+            {
+                path,
+                entryType: "FILE",
+                state: "PRESENT",
+                contentHash: remoteHash,
+                size: remoteContent.byteLength,
+            },
+        ],
+    });
+
+    const resolved = await apply.resolveKeepDeleted(path);
+    const pending = await store.pendingForPath(path);
+
+    assert.equal(resolved, true);
+    assert.equal(await vault.readFile(path), undefined);
+    assert.equal(await store.hasConflict(path), false);
+    assert.equal(await store.operation(discarded.operationId), undefined);
+    assert.equal(pending?.type, "DELETE");
+    if (pending?.type !== "DELETE") {
+        throw new Error("Expected a pending DELETE operation");
+    }
+    assert.equal(pending.baseRevision, 9);
+    assert.equal(pending.baseContentHash, remoteHash);
+    store.close();
+}
+
 class DownloadTransport implements ContentTransport {
     public constructor(private readonly content: ArrayBuffer) {}
 
@@ -831,3 +889,4 @@ await retriesAnInFlightCreateAfterAStoreRestart();
 await continuesPullingUnrelatedPathsAfterAConflict();
 await explicitlyResolvesAConflictByUsingTheServerVersion();
 await explicitlyResolvesAConflictByApplyingTheLocalVersion();
+await explicitlyResolvesAConflictByKeepingTheLocalDeletion();

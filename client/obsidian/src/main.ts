@@ -64,6 +64,13 @@ export default class VaultDatumPlugin extends Plugin {
                 void this.openApplyLocalConflictPicker();
             },
         });
+        this.addCommand({
+            id: "resolve-conflict-keep-deleted",
+            name: "Resolve conflict: keep Deleted",
+            callback: () => {
+                void this.openKeepDeletedConflictPicker();
+            },
+        });
 
         this.app.workspace.onLayoutReady(() => {
             this.observeVaultChanges();
@@ -279,6 +286,50 @@ export default class VaultDatumPlugin extends Plugin {
             console.warn("VaultDatum could not prepare the local version");
             new Notice(
                 "VaultDatum could not apply the local version. The conflict was kept.",
+            );
+        }
+    }
+
+    private async openKeepDeletedConflictPicker(): Promise<void> {
+        const store = this.store;
+
+        if (store === undefined) {
+            return;
+        }
+
+        const conflicts = await store.conflicts();
+        if (conflicts.length === 0) {
+            new Notice("VaultDatum has no conflicts to resolve.");
+            return;
+        }
+
+        new ConflictResolutionModal(
+            this.app,
+            conflicts,
+            "Choose a deleted local file to keep deleted",
+            (conflict) => this.resolveKeepDeleted(conflict),
+        ).open();
+    }
+
+    private async resolveKeepDeleted(conflict: RemoteConflict): Promise<void> {
+        const createSync = this.createSync;
+
+        if (createSync === undefined) {
+            return;
+        }
+
+        try {
+            if (await createSync.resolveKeepDeleted(conflict.path)) {
+                new Notice(`VaultDatum queued deletion of ${conflict.path}.`);
+                void this.syncNow(false);
+                return;
+            }
+
+            new Notice("VaultDatum could not find that conflict anymore.");
+        } catch {
+            console.warn("VaultDatum could not prepare the local deletion");
+            new Notice(
+                "VaultDatum could not keep that deletion. The conflict was kept.",
             );
         }
     }

@@ -128,6 +128,10 @@ export class CreateSync {
         return this.remoteApply.resolveApplyLocal(path);
     }
 
+    public async resolveKeepDeleted(path: string): Promise<boolean> {
+        return this.remoteApply.resolveKeepDeleted(path);
+    }
+
     private async captureContent(
         path: string,
         content: ArrayBuffer,

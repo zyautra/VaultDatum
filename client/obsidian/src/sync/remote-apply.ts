@@ -3,6 +3,7 @@ import { isSyncPath } from "../core/sync-path";
 import {
     type ApplyIntent,
     ClientStore,
+    type PendingDelete,
     type PendingModify,
     type PendingOperation,
     type ReplicaEntry,
@@ -143,6 +144,47 @@ export class RemoteApply {
             pending,
             new Blob([localContent]),
         );
+        return true;
+    }
+
+    public async resolveKeepDeleted(path: string): Promise<boolean> {
+        if ((await this.store.conflict(path)) === undefined) {
+            return false;
+        }
+        if ((await this.localVault.readFile(path)) !== undefined) {
+            throw new Error(
+                "Keeping a deletion requires the local file to be absent",
+            );
+        }
+
+        const serverState = await this.store.replica(path);
+        if (serverState === undefined) {
+            throw new Error("A conflict has no authoritative replica state");
+        }
+        if (serverState.state === "DELETED") {
+            await this.store.discardPendingAndClearConflicts(path);
+            return true;
+        }
+        if (
+            serverState.entryType !== "FILE" ||
+            serverState.contentHash === undefined
+        ) {
+            throw new Error(
+                "Keeping a deletion requires a present Server file",
+            );
+        }
+
+        const pending: PendingDelete = {
+            operationId: `OP-${crypto.randomUUID()}`,
+            clientId: await this.store.clientId(),
+            type: "DELETE",
+            path,
+            baseRevision: serverState.revision,
+            baseContentHash: serverState.contentHash,
+            createdAt: new Date().toISOString(),
+            status: "READY",
+        };
+        await this.store.replaceConflictWithDelete(pending);
         return true;
     }
 
