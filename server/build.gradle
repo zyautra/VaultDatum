@@ -2,6 +2,7 @@ plugins {
     id "java"
     id "checkstyle"
     id "io.quarkus"
+    id "org.jooq.jooq-codegen-gradle" version "3.21.8"
 }
 
 java {
@@ -20,9 +21,66 @@ tasks.withType(Test).configureEach {
     useJUnitPlatform()
 }
 
+tasks.named("compileJava") {
+    dependsOn tasks.named("jooqCodegen")
+    source layout.buildDirectory.dir("generated-src/jooq/main")
+}
+
+def jooqSchema = layout.buildDirectory.file("jooq/sync.db")
+def jooqMigrations = fileTree("src/main/resources/db/migration") {
+    include "V*__*.sql"
+}.files.sort { left, right -> left.name <=> right.name }.collect { migration -> migration.getText("UTF-8") }.join("\n")
+
+tasks.named("jooqCodegen") {
+    inputs.files fileTree("src/main/resources/db/migration") {
+        include "V*__*.sql"
+    }
+    doFirst {
+        jooqSchema.get().asFile.parentFile.mkdirs()
+        delete jooqSchema.get().asFile
+        delete "${jooqSchema.get().asFile}-wal"
+        delete "${jooqSchema.get().asFile}-shm"
+    }
+}
+
 checkstyle {
     configFile = rootProject.file("config/checkstyle/checkstyle.xml")
     toolVersion = "14.1.0"
+}
+
+tasks.named("checkstyleMain") {
+    source = fileTree("src/main/java")
+}
+
+jooq {
+    configuration {
+        jdbc {
+            driver = "org.sqlite.JDBC"
+            url = "jdbc:sqlite:${jooqSchema.get().asFile}"
+            initScript = jooqMigrations
+        }
+        generator {
+            name = "org.jooq.codegen.JavaGenerator"
+            database {
+                name = "org.jooq.meta.sqlite.SQLiteDatabase"
+                forcedTypes {
+                    forcedType {
+                        name = "BIGINT"
+                        includeExpression = "(?i:.*(?:revision|size))"
+                    }
+                }
+            }
+            generate {
+                deprecated = false
+                daos = false
+                pojos = false
+            }
+            target {
+                packageName = "io.vaultdatum.server.jooq"
+                directory = layout.buildDirectory.dir("generated-src/jooq/main").get().asFile.toString()
+            }
+        }
+    }
 }
 
 dependencies {
@@ -35,6 +93,8 @@ dependencies {
     implementation "io.quarkus:quarkus-flyway"
     implementation "org.jooq:jooq:3.21.8"
     runtimeOnly "org.xerial:sqlite-jdbc:3.53.4.0"
+
+    jooqCodegen "org.xerial:sqlite-jdbc:3.53.4.0"
 
     testImplementation "io.quarkus:quarkus-junit5"
     testImplementation "io.rest-assured:rest-assured"

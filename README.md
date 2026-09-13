@@ -11,6 +11,10 @@ Vault while preserving local usability during offline work.
 The repository includes a Gradle wrapper; a system Gradle installation is not
 required.
 
+Server builds run jOOQ code generation automatically from the versioned SQLite
+migrations. Generated sources are build output and are never edited or
+committed; run `./gradlew :server:jooqCodegen` when you need to inspect them.
+
 ## Validate the Initial Setup
 
 ```bash
@@ -30,7 +34,23 @@ npm --prefix client/obsidian run build
 ./gradlew :server:quarkusDev
 ```
 
-The initial health endpoint is available at `GET /health` on port 8080.
+The health endpoint is available at `GET /health` on port 8080. The server also
+exposes `GET /api/v1/vault` and the first mutation endpoint,
+`POST /api/v1/operations` for multipart `CREATE` requests.
+
+## Current CREATE Slice
+
+The Obsidian plugin has a **Server URL** setting. After the plugin has started,
+a newly created file outside `.obsidian/` is read as binary data, hashed, and
+stored with a pending CREATE record in IndexedDB before it is eligible for
+upload. The same stored snapshot and operation ID are retried after an
+interrupted request or a plugin restart. A server commit removes the pending
+record and its artifact atomically; a conflict remains durable and is not
+silently overwritten.
+
+This slice deliberately supports only newly observed `CREATE` operations. It
+does not yet import an existing Vault, pull remote changes, or synchronize
+modify, delete, rename, and move operations.
 
 ## Update Client Protocol Types
 

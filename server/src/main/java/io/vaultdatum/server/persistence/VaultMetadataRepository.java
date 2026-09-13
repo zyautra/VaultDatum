@@ -1,24 +1,15 @@
 package io.vaultdatum.server.persistence;
 
+import static io.vaultdatum.server.jooq.Tables.VAULT_METADATA;
+
 import jakarta.enterprise.context.ApplicationScoped;
 import org.jooq.DSLContext;
-import org.jooq.Field;
-import org.jooq.Record;
-import org.jooq.Table;
 import org.jooq.impl.DSL;
 
 import java.util.UUID;
 
 @ApplicationScoped
 public final class VaultMetadataRepository {
-
-    private static final Table<Record> VAULT_METADATA = DSL.table(DSL.name("vault_metadata"));
-
-    private static final Field<Integer> ID = DSL.field(DSL.name("id"), Integer.class);
-
-    private static final Field<String> VAULT_ID = DSL.field(DSL.name("vault_id"), String.class);
-
-    private static final Field<Long> CURRENT_REVISION = DSL.field(DSL.name("current_revision"), Long.class);
 
     private final DSLContext dsl;
 
@@ -37,7 +28,7 @@ public final class VaultMetadataRepository {
 
             VaultMetadata created = new VaultMetadata("V-" + UUID.randomUUID(), 0);
             transaction.insertInto(VAULT_METADATA)
-                    .columns(ID, VAULT_ID, CURRENT_REVISION)
+                    .columns(VAULT_METADATA.ID, VAULT_METADATA.VAULT_ID, VAULT_METADATA.CURRENT_REVISION)
                     .values(1, created.vaultId(), created.currentRevision())
                     .execute();
             return created;
@@ -55,15 +46,15 @@ public final class VaultMetadataRepository {
     }
 
     private VaultMetadata find(DSLContext context) {
-        Record record = context.select(VAULT_ID, CURRENT_REVISION)
+        var record = context.select(VAULT_METADATA.VAULT_ID, VAULT_METADATA.CURRENT_REVISION)
                 .from(VAULT_METADATA)
-                .where(ID.eq(1))
+                .where(VAULT_METADATA.ID.eq(1))
                 .fetchOne();
 
         if (record == null) {
             return null;
         }
 
-        return new VaultMetadata(record.get(VAULT_ID), record.get(CURRENT_REVISION));
+        return new VaultMetadata(record.get(VAULT_METADATA.VAULT_ID), record.get(VAULT_METADATA.CURRENT_REVISION));
     }
 }

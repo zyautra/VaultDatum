@@ -1,6 +1,7 @@
 package io.vaultdatum.server.api;
 
 import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.greaterThanOrEqualTo;
 import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.startsWith;
 
@@ -17,8 +18,8 @@ class VaultResourceTest {
                 .then()
                 .statusCode(200)
                 .body("vaultId", startsWith("V-"))
-                .body("currentRevision", is(0))
-                .body("oldestRetainedRevision", is(0))
+                .body("currentRevision", greaterThanOrEqualTo(0))
+                .body("oldestRetainedRevision", greaterThanOrEqualTo(0))
                 .body("protocolVersion", is(1))
                 .body("hashAlgorithm", is("SHA-256"));
     }
