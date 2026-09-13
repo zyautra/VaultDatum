@@ -36,7 +36,13 @@ npm --prefix client/obsidian run build
 
 The health endpoint is available at `GET /health` on port 8080. The server also
 exposes `GET /api/v1/vault` and `POST /api/v1/operations` for multipart
-`CREATE`/`MODIFY` and JSON `DELETE` requests.
+`CREATE`/`MODIFY` and JSON `DELETE`/`RENAME` requests.
+
+The server durably records a mutation as `PREPARED` before changing the Vault
+filesystem. Startup recovery completes prepared CREATE, MODIFY, DELETE, and
+RENAME operations whether their filesystem effect had not yet occurred or had
+already occurred before SQLite finalization. A committed operation is
+idempotently replayed if its response was lost.
 
 ## Current Sync Slice
 
