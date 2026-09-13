@@ -51,7 +51,7 @@ export class RemoteApply {
                 continue;
             }
             if (matches(intent.before, actual)) {
-                await this.store.discardApply(intent.applyId);
+                await this.resumeOrDiscardPreparedApply(intent);
                 continue;
             }
 
@@ -60,7 +60,7 @@ export class RemoteApply {
                 intent.after,
                 "REMOTE_APPLY_RECOVERY_REQUIRED",
             );
-            await this.store.discardApply(intent.applyId);
+            await this.store.discardApply(intent);
         }
     }
 
@@ -674,6 +674,11 @@ export class RemoteApply {
             path,
             before,
             after,
+            phase: "PREPARED",
+            artifactId:
+                after.state === "PRESENT"
+                    ? `apply-${after.revision}:${path}`
+                    : undefined,
         };
         await this.store.prepareApply(intent);
 
@@ -707,9 +712,40 @@ export class RemoteApply {
             );
         }
 
+        const staged = await this.store.stageApplyContent(
+            intent,
+            new Blob([downloaded.value]),
+        );
         await this.localVault.writeFile(path, downloaded.value);
-        await this.store.completeApply(intent);
+        await this.store.completeApply(staged);
         return false;
+    }
+
+    private async resumeOrDiscardPreparedApply(
+        intent: ApplyIntent,
+    ): Promise<void> {
+        const stagedContent = await this.store.applyContent(intent);
+        if (
+            stagedContent === undefined ||
+            intent.after.state !== "PRESENT" ||
+            intent.after.contentHash === undefined ||
+            intent.after.size === undefined
+        ) {
+            await this.store.discardApply(intent);
+            return;
+        }
+
+        const content = await stagedContent.arrayBuffer();
+        if (
+            content.byteLength !== intent.after.size ||
+            (await contentHash(content)) !== intent.after.contentHash
+        ) {
+            await this.store.discardApply(intent);
+            return;
+        }
+
+        await this.localVault.writeFile(intent.path, content);
+        await this.store.completeApply(intent);
     }
 
     private async recordConflict(

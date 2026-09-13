@@ -60,6 +60,12 @@ contains several revisions for one path, it applies the final state rather than
 asking the server for content that is no longer current. Existing divergent
 local content becomes a conflict; it is never overwritten.
 
+Before replacing a local file, a client records a prepared apply intent and
+stores the verified remote bytes as a temporary IndexedDB artifact. On restart,
+it finalizes an already-applied result, resumes a staged safe write, discards an
+unstaged intent for a later retry, or preserves an unexpected local state as a
+conflict.
+
 This slice does not yet import an existing Vault, synchronize MOVE operations,
 or restore a locally recreated tombstoned path. RENAME changes are applied only
 when both source and destination paths are safe; a divergent local source or

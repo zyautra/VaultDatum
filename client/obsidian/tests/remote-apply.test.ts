@@ -52,6 +52,163 @@ async function appliesARemoteCreateToAnEmptyVault(): Promise<void> {
     store.close();
 }
 
+async function discardsAnApplyInterruptedBeforeContentIsStaged(): Promise<void> {
+    const path = "notes/prepared-apply.md";
+    const remote = bytes("Remote content waiting to download");
+    const remoteHash = await contentHash(remote);
+    const store = await ClientStore.open(
+        `test-prepared-apply-${crypto.randomUUID()}`,
+    );
+    const vault = new MemoryVault();
+    const apply = new RemoteApply(store, new NoopTransport(), vault);
+
+    await assert.rejects(
+        apply.integrateChange(
+            "https://vaultdatum.test",
+            createChange(path, remoteHash, remote.byteLength),
+        ),
+        /Could not download remote content/,
+    );
+    assert.deepEqual(await store.applyIntents(), [
+        {
+            applyId: `1:${path}`,
+            path,
+            before: undefined,
+            after: {
+                path,
+                entryType: "FILE",
+                state: "PRESENT",
+                revision: 1,
+                contentHash: remoteHash,
+                size: remote.byteLength,
+            },
+            phase: "PREPARED",
+            artifactId: `apply-1:${path}`,
+        },
+    ]);
+
+    await apply.recoverInterruptedApplies();
+
+    assert.deepEqual(await store.applyIntents(), []);
+    assert.equal(await vault.readFile(path), undefined);
+    assert.equal(await store.replica(path), undefined);
+    store.close();
+}
+
+async function resumesAStagedApplyAfterRestartBeforeLocalWrite(): Promise<void> {
+    const path = "notes/staged-apply.md";
+    const remote = bytes("Durable remote apply content");
+    const remoteHash = await contentHash(remote);
+    const databaseName = `test-staged-apply-${crypto.randomUUID()}`;
+    const store = await ClientStore.open(databaseName);
+    const vault = new FaultingMemoryVault();
+    vault.failBeforeNextWrite();
+    const apply = new RemoteApply(store, new DownloadTransport(remote), vault);
+
+    await assert.rejects(
+        apply.integrateChange(
+            "https://vaultdatum.test",
+            createChange(path, remoteHash, remote.byteLength),
+        ),
+        /Simulated write failure before local mutation/,
+    );
+    const [staged] = await store.applyIntents();
+    assert.equal(staged?.phase, "CONTENT_READY");
+    if (staged === undefined) {
+        throw new Error("Expected staged apply metadata");
+    }
+    assert.equal((await store.applyContent(staged)) instanceof Blob, true);
+    store.close();
+
+    const restartedStore = await ClientStore.open(databaseName);
+    const restartedApply = new RemoteApply(
+        restartedStore,
+        new NoopTransport(),
+        vault,
+    );
+    await restartedApply.recoverInterruptedApplies();
+
+    assert.equal(await vault.hash(path), remoteHash);
+    assert.equal((await restartedStore.replica(path))?.revision, 1);
+    assert.deepEqual(await restartedStore.applyIntents(), []);
+    restartedStore.close();
+}
+
+async function finalizesAnApplyAfterLocalWriteBeforeMetadataFinalization(): Promise<void> {
+    const path = "notes/applied-before-finalize.md";
+    const remote = bytes("Remote content written before metadata finalization");
+    const remoteHash = await contentHash(remote);
+    const databaseName = `test-applied-before-finalize-${crypto.randomUUID()}`;
+    const store = await ClientStore.open(databaseName);
+    const vault = new FaultingMemoryVault();
+    vault.failAfterNextWrite();
+    const apply = new RemoteApply(store, new DownloadTransport(remote), vault);
+
+    await assert.rejects(
+        apply.integrateChange(
+            "https://vaultdatum.test",
+            createChange(path, remoteHash, remote.byteLength),
+        ),
+        /Simulated write failure after local mutation/,
+    );
+    assert.equal(await vault.hash(path), remoteHash);
+    assert.equal((await store.applyIntents())[0]?.phase, "CONTENT_READY");
+    assert.equal(await store.replica(path), undefined);
+    store.close();
+
+    const restartedStore = await ClientStore.open(databaseName);
+    const restartedApply = new RemoteApply(
+        restartedStore,
+        new NoopTransport(),
+        vault,
+    );
+    await restartedApply.recoverInterruptedApplies();
+
+    assert.equal(await vault.hash(path), remoteHash);
+    assert.equal((await restartedStore.replica(path))?.revision, 1);
+    assert.deepEqual(await restartedStore.applyIntents(), []);
+    restartedStore.close();
+}
+
+async function preservesUnexpectedLocalContentDuringApplyRecovery(): Promise<void> {
+    const path = "notes/unexpected-apply.md";
+    const remote = bytes("Remote content that must not overwrite a later edit");
+    const local = bytes("Local content written after interruption");
+    const remoteHash = await contentHash(remote);
+    const databaseName = `test-unexpected-apply-${crypto.randomUUID()}`;
+    const store = await ClientStore.open(databaseName);
+    const vault = new FaultingMemoryVault();
+    vault.failBeforeNextWrite();
+    const apply = new RemoteApply(store, new DownloadTransport(remote), vault);
+
+    await assert.rejects(
+        apply.integrateChange(
+            "https://vaultdatum.test",
+            createChange(path, remoteHash, remote.byteLength),
+        ),
+        /Simulated write failure before local mutation/,
+    );
+    await vault.writeFile(path, local);
+    store.close();
+
+    const restartedStore = await ClientStore.open(databaseName);
+    const restartedApply = new RemoteApply(
+        restartedStore,
+        new NoopTransport(),
+        vault,
+    );
+    await restartedApply.recoverInterruptedApplies();
+
+    assert.equal(await vault.hash(path), await contentHash(local));
+    assert.equal(
+        (await restartedStore.conflict(path))?.code,
+        "REMOTE_APPLY_RECOVERY_REQUIRED",
+    );
+    assert.equal((await restartedStore.replica(path))?.contentHash, remoteHash);
+    assert.deepEqual(await restartedStore.applyIntents(), []);
+    restartedStore.close();
+}
+
 async function preservesAnExistingLocalFileAsAConflict(): Promise<void> {
     const local = bytes("Local note");
     const remote = bytes("Remote note");
@@ -1297,6 +1454,34 @@ class MemoryVault implements LocalVault {
     }
 }
 
+class FaultingMemoryVault extends MemoryVault {
+    private nextWriteFailure: "BEFORE" | "AFTER" | undefined;
+
+    public failBeforeNextWrite(): void {
+        this.nextWriteFailure = "BEFORE";
+    }
+
+    public failAfterNextWrite(): void {
+        this.nextWriteFailure = "AFTER";
+    }
+
+    public override async writeFile(
+        path: string,
+        content: ArrayBuffer,
+    ): Promise<void> {
+        const failure = this.nextWriteFailure;
+        this.nextWriteFailure = undefined;
+        if (failure === "BEFORE") {
+            throw new Error("Simulated write failure before local mutation");
+        }
+
+        await super.writeFile(path, content);
+        if (failure === "AFTER") {
+            throw new Error("Simulated write failure after local mutation");
+        }
+    }
+}
+
 function createChange(
     path: string,
     contentHashValue: string,
@@ -1363,6 +1548,10 @@ async function pendingModify(
 }
 
 await appliesARemoteCreateToAnEmptyVault();
+await discardsAnApplyInterruptedBeforeContentIsStaged();
+await resumesAStagedApplyAfterRestartBeforeLocalWrite();
+await finalizesAnApplyAfterLocalWriteBeforeMetadataFinalization();
+await preservesUnexpectedLocalContentDuringApplyRecovery();
 await preservesAnExistingLocalFileAsAConflict();
 await integratesAnOwnChangeAfterTheOperationResponseWasLost();
 await appliesARemoteDeleteToAMatchingReplica();

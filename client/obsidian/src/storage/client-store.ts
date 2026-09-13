@@ -64,6 +64,8 @@ export interface ApplyIntent {
     readonly path: string;
     readonly before?: ReplicaEntry;
     readonly after: ReplicaEntry;
+    readonly phase: "PREPARED" | "CONTENT_READY";
+    readonly artifactId?: string;
 }
 
 export interface RemoteConflict {
@@ -369,17 +371,65 @@ export class ClientStore {
         await this.put(APPLY_STORE, intent);
     }
 
-    public async discardApply(applyId: string): Promise<void> {
-        await this.delete(APPLY_STORE, applyId);
+    public async stageApplyContent(
+        intent: ApplyIntent,
+        content: Blob,
+    ): Promise<ApplyIntent> {
+        const artifactId = intent.artifactId;
+        if (
+            intent.phase !== "PREPARED" ||
+            intent.after.state !== "PRESENT" ||
+            artifactId === undefined
+        ) {
+            throw new Error("Only a prepared file apply can stage content");
+        }
+
+        const staged: ApplyIntent = { ...intent, phase: "CONTENT_READY" };
+        const transaction = this.database.transaction(
+            [APPLY_STORE, ARTIFACT_STORE],
+            "readwrite",
+        );
+        transaction.objectStore(ARTIFACT_STORE).put({
+            artifactId,
+            content,
+        } satisfies Artifact);
+        transaction.objectStore(APPLY_STORE).put(staged);
+        await transactionDone(transaction);
+        return staged;
+    }
+
+    public async applyContent(intent: ApplyIntent): Promise<Blob | undefined> {
+        if (
+            intent.phase !== "CONTENT_READY" ||
+            intent.artifactId === undefined
+        ) {
+            return undefined;
+        }
+        return this.artifact(intent.artifactId);
+    }
+
+    public async discardApply(intent: ApplyIntent): Promise<void> {
+        const transaction = this.database.transaction(
+            [APPLY_STORE, ARTIFACT_STORE],
+            "readwrite",
+        );
+        transaction.objectStore(APPLY_STORE).delete(intent.applyId);
+        if (intent.artifactId !== undefined) {
+            transaction.objectStore(ARTIFACT_STORE).delete(intent.artifactId);
+        }
+        await transactionDone(transaction);
     }
 
     public async completeApply(intent: ApplyIntent): Promise<void> {
         const transaction = this.database.transaction(
-            [APPLY_STORE, REPLICA_STORE],
+            [APPLY_STORE, ARTIFACT_STORE, REPLICA_STORE],
             "readwrite",
         );
         transaction.objectStore(REPLICA_STORE).put(intent.after);
         transaction.objectStore(APPLY_STORE).delete(intent.applyId);
+        if (intent.artifactId !== undefined) {
+            transaction.objectStore(ARTIFACT_STORE).delete(intent.artifactId);
+        }
         await transactionDone(transaction);
     }
 
