@@ -72,10 +72,14 @@ public final class CreateCoordinator {
                         operations.STAGING_REFERENCE,
                         operationCreates.PATH,
                         operationCreates.CONTENT_HASH,
-                        operationCreates.SIZE)
+                        operationCreates.SIZE,
+                        OPERATION_BASE_CONDITION.EXPECTED_STATE,
+                        OPERATION_BASE_CONDITION.EXPECTED_REVISION)
                 .from(operations)
                 .join(operationCreates)
                 .on(operationCreates.OPERATION_ID.eq(operations.OPERATION_ID))
+                .join(OPERATION_BASE_CONDITION)
+                .on(OPERATION_BASE_CONDITION.OPERATION_ID.eq(operations.OPERATION_ID))
                 .where(operations.STATUS.eq("PREPARED"))
                 .fetch();
 
@@ -84,6 +88,9 @@ public final class CreateCoordinator {
                     record.get(operations.OPERATION_ID),
                     record.get(operations.ACTOR_CLIENT_ID),
                     SyncPath.parse(record.get(operationCreates.PATH)),
+                    createBase(
+                            record.get(OPERATION_BASE_CONDITION.EXPECTED_STATE),
+                            record.get(OPERATION_BASE_CONDITION.EXPECTED_REVISION)),
                     record.get(operationCreates.CONTENT_HASH),
                     record.get(operationCreates.SIZE));
             String requestDigest = requestDigest(operation);
@@ -128,12 +135,14 @@ public final class CreateCoordinator {
     private void prepare(CreateOperation operation, Path stagedContent) {
         dsl.transaction(configuration -> {
             DSLContext transaction = DSL.using(configuration);
-            boolean knownPath = transaction.fetchExists(
-                    transaction.selectOne().from(PATH_STATE).where(PATH_STATE.PATH.eq(operation.path().value())));
-
-            if (knownPath) {
-                throw new BaseStateMismatchException("The create path is already known to the server");
-            }
+            var pathState = transaction.select(
+                            PATH_STATE.ENTRY_TYPE,
+                            PATH_STATE.STATE,
+                            PATH_STATE.LATEST_REVISION)
+                    .from(PATH_STATE)
+                    .where(PATH_STATE.PATH.eq(operation.path().value()))
+                    .fetchOne();
+            validateBase(operation, pathState);
 
             transaction.insertInto(OPERATIONS)
                     .columns(
@@ -158,8 +167,14 @@ public final class CreateCoordinator {
                             OPERATION_BASE_CONDITION.OPERATION_ID,
                             OPERATION_BASE_CONDITION.ORDINAL,
                             OPERATION_BASE_CONDITION.PATH,
-                            OPERATION_BASE_CONDITION.EXPECTED_STATE)
-                    .values(operation.operationId(), 0, operation.path().value(), "UNKNOWN")
+                            OPERATION_BASE_CONDITION.EXPECTED_STATE,
+                            OPERATION_BASE_CONDITION.EXPECTED_REVISION)
+                    .values(
+                            operation.operationId(),
+                            0,
+                            operation.path().value(),
+                            baseState(operation.base()),
+                            baseRevision(operation.base()))
                     .execute();
             transaction.insertInto(OPERATION_CREATE)
                     .columns(
@@ -216,22 +231,39 @@ public final class CreateCoordinator {
                     .set(VAULT_METADATA.CURRENT_REVISION, revision)
                     .where(VAULT_METADATA.ID.eq(1))
                     .execute();
-            transaction.insertInto(PATH_STATE)
-                    .columns(
-                            PATH_STATE.PATH,
-                            PATH_STATE.ENTRY_TYPE,
-                            PATH_STATE.STATE,
-                            PATH_STATE.LATEST_REVISION,
-                            PATH_STATE.CONTENT_HASH,
-                            PATH_STATE.SIZE)
-                    .values(
-                            operation.path().value(),
-                            "FILE",
-                            "PRESENT",
-                            revision,
-                            operation.contentHash(),
-                            operation.size())
-                    .execute();
+            if (operation.base() instanceof UnknownCreateBase) {
+                transaction.insertInto(PATH_STATE)
+                        .columns(
+                                PATH_STATE.PATH,
+                                PATH_STATE.ENTRY_TYPE,
+                                PATH_STATE.STATE,
+                                PATH_STATE.LATEST_REVISION,
+                                PATH_STATE.CONTENT_HASH,
+                                PATH_STATE.SIZE)
+                        .values(
+                                operation.path().value(),
+                                "FILE",
+                                "PRESENT",
+                                revision,
+                                operation.contentHash(),
+                                operation.size())
+                        .execute();
+            } else {
+                int restored = transaction.update(PATH_STATE)
+                        .set(PATH_STATE.ENTRY_TYPE, "FILE")
+                        .set(PATH_STATE.STATE, "PRESENT")
+                        .set(PATH_STATE.LATEST_REVISION, revision)
+                        .set(PATH_STATE.CONTENT_HASH, operation.contentHash())
+                        .set(PATH_STATE.SIZE, operation.size())
+                        .setNull(PATH_STATE.LAST_CONTENT_HASH)
+                        .where(PATH_STATE.PATH.eq(operation.path().value()))
+                        .and(PATH_STATE.STATE.eq("DELETED"))
+                        .execute();
+
+                if (restored != 1) {
+                    throw new IllegalStateException("Deleted create path state was lost before finalization");
+                }
+            }
             transaction.insertInto(CHANGE_JOURNAL)
                     .columns(
                             CHANGE_JOURNAL.REVISION,
@@ -309,8 +341,43 @@ public final class CreateCoordinator {
                 operation.operationId(),
                 operation.clientId(),
                 operation.path().value(),
+                baseState(operation.base()),
+                baseRevision(operation.base()) == null ? "" : Long.toString(baseRevision(operation.base())),
                 operation.contentHash(),
                 Long.toString(operation.size())));
+    }
+
+    private static CreateBase createBase(String state, Long revision) {
+        if ("UNKNOWN".equals(state) && revision == null) {
+            return UnknownCreateBase.INSTANCE;
+        }
+        if ("DELETED".equals(state) && revision != null && revision >= 1) {
+            return new DeletedCreateBase(revision);
+        }
+
+        throw new IllegalStateException("Prepared create has an invalid base condition");
+    }
+
+    private static void validateBase(CreateOperation operation, org.jooq.Record pathState) {
+        if (operation.base() instanceof UnknownCreateBase && pathState == null) {
+            return;
+        }
+        if (operation.base() instanceof DeletedCreateBase deleted && pathState != null
+                && "FILE".equals(pathState.get(PATH_STATE.ENTRY_TYPE))
+                && "DELETED".equals(pathState.get(PATH_STATE.STATE))
+                && deleted.revision() == pathState.get(PATH_STATE.LATEST_REVISION)) {
+            return;
+        }
+
+        throw new BaseStateMismatchException("The create base does not match the authoritative Vault");
+    }
+
+    private static String baseState(CreateBase base) {
+        return base instanceof UnknownCreateBase ? "UNKNOWN" : "DELETED";
+    }
+
+    private static Long baseRevision(CreateBase base) {
+        return base instanceof DeletedCreateBase deleted ? deleted.revision() : null;
     }
 
     private static void forceDirectory(Path directory) {

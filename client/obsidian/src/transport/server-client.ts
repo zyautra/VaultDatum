@@ -254,7 +254,16 @@ function contentMetadata(
             clientId: pending.clientId,
             type: "CREATE",
             path: pending.path,
-            base: [{ path: pending.path, state: "UNKNOWN" }],
+            base:
+                pending.base.state === "UNKNOWN"
+                    ? [{ path: pending.path, state: "UNKNOWN" }]
+                    : [
+                          {
+                              path: pending.path,
+                              state: "DELETED",
+                              revision: pending.base.revision,
+                          },
+                      ],
             content: {
                 contentHash: pending.contentHash,
                 size: pending.size,

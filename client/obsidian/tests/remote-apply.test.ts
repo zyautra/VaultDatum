@@ -87,6 +87,7 @@ async function integratesAnOwnChangeAfterTheOperationResponseWasLost(): Promise<
         clientId: "C-test-client",
         type: "CREATE",
         path: "notes/own.md",
+        base: { state: "UNKNOWN" },
         contentHash: contentHashValue,
         size: content.byteLength,
         artifactId: `artifact-${crypto.randomUUID()}`,
@@ -213,6 +214,7 @@ async function pullsTheLatestContentAfterAnOwnIntermediateChange(): Promise<void
         clientId: "C-own-client",
         type: "CREATE",
         path: "notes/history.md",
+        base: { state: "UNKNOWN" },
         contentHash: ownHash,
         size: ownContent.byteLength,
         artifactId: `artifact-${crypto.randomUUID()}`,
@@ -401,6 +403,7 @@ async function explicitlyResolvesAConflictByUsingTheServerVersion(): Promise<voi
         clientId: "C-local-client",
         type: "CREATE",
         path,
+        base: { state: "UNKNOWN" },
         contentHash: localHash,
         size: localContent.byteLength,
         artifactId: `artifact-${crypto.randomUUID()}`,
@@ -465,6 +468,7 @@ async function explicitlyResolvesAConflictByApplyingTheLocalVersion(): Promise<v
         clientId: "C-local-client",
         type: "CREATE",
         path,
+        base: { state: "UNKNOWN" },
         contentHash: localHash,
         size: localContent.byteLength,
         artifactId: `artifact-${crypto.randomUUID()}`,
@@ -576,6 +580,70 @@ async function explicitlyResolvesAConflictByKeepingTheLocalDeletion(): Promise<v
     }
     assert.equal(pending.baseRevision, 9);
     assert.equal(pending.baseContentHash, remoteHash);
+    store.close();
+}
+
+async function explicitlyResolvesAConflictByRestoringLocalContent(): Promise<void> {
+    const path = "notes/restore-local.md";
+    const localContent = bytes("Local content to restore");
+    const localHash = await contentHash(localContent);
+    const discarded: PendingModify = {
+        operationId: `OP-${crypto.randomUUID()}`,
+        clientId: "C-local-client",
+        type: "MODIFY",
+        path,
+        baseRevision: 3,
+        baseContentHash: await contentHash(bytes("Original server content")),
+        contentHash: localHash,
+        size: localContent.byteLength,
+        artifactId: `artifact-${crypto.randomUUID()}`,
+        createdAt: new Date().toISOString(),
+        status: "READY",
+    };
+    const store = await ClientStore.open(
+        `test-restore-local-resolution-${crypto.randomUUID()}`,
+    );
+    const vault = new MemoryVault();
+    await vault.writeFile(path, localContent);
+    await store.saveContentOperation(discarded, new Blob([localContent]));
+    const apply = new RemoteApply(
+        store,
+        new DownloadTransport(localContent),
+        vault,
+    );
+
+    await apply.integrateChange("https://vaultdatum.test", {
+        revision: 11,
+        type: "DELETE",
+        operationId: `OP-${crypto.randomUUID()}`,
+        actor: { type: "CLIENT", clientId: "C-remote-client" },
+        effects: [
+            {
+                path,
+                entryType: "FILE",
+                state: "DELETED",
+            },
+        ],
+    });
+
+    const resolved = await apply.resolveRestoreLocal(path);
+    const pending = await store.pendingForPath(path);
+
+    assert.equal(resolved, true);
+    assert.equal(await vault.hash(path), localHash);
+    assert.equal(await store.hasConflict(path), false);
+    assert.equal(await store.operation(discarded.operationId), undefined);
+    assert.equal(await store.artifact(discarded.artifactId), undefined);
+    assert.equal(pending?.type, "CREATE");
+    if (pending?.type !== "CREATE") {
+        throw new Error("Expected a pending CREATE operation");
+    }
+    assert.deepEqual(pending.base, { state: "DELETED", revision: 11 });
+    assert.equal(pending.contentHash, localHash);
+    assert.equal(
+        (await store.artifact(pending.artifactId)) instanceof Blob,
+        true,
+    );
     store.close();
 }
 
@@ -890,3 +958,4 @@ await continuesPullingUnrelatedPathsAfterAConflict();
 await explicitlyResolvesAConflictByUsingTheServerVersion();
 await explicitlyResolvesAConflictByApplyingTheLocalVersion();
 await explicitlyResolvesAConflictByKeepingTheLocalDeletion();
+await explicitlyResolvesAConflictByRestoringLocalContent();

@@ -17,6 +17,9 @@ interface PendingContentOperation extends PendingOperationBase {
 
 export interface PendingCreate extends PendingContentOperation {
     readonly type: "CREATE";
+    readonly base:
+        | { readonly state: "UNKNOWN" }
+        | { readonly state: "DELETED"; readonly revision: number };
 }
 
 export interface PendingModify extends PendingContentOperation {
@@ -421,6 +424,28 @@ export class ClientStore {
 
     public async replaceConflictWithModify(
         pending: PendingModify,
+        content: Blob,
+    ): Promise<void> {
+        const replaced = await this.pendingForPath(pending.path);
+        const conflicts = await this.conflictsForPath(pending.path);
+        const transaction = this.database.transaction(
+            [CONFLICT_STORE, PENDING_STORE, ARTIFACT_STORE],
+            "readwrite",
+        );
+        this.discardPendingInTransaction(transaction, replaced);
+        for (const conflict of conflicts) {
+            transaction.objectStore(CONFLICT_STORE).delete(conflict.conflictId);
+        }
+        transaction.objectStore(ARTIFACT_STORE).put({
+            artifactId: pending.artifactId,
+            content,
+        } satisfies Artifact);
+        transaction.objectStore(PENDING_STORE).put(pending);
+        await transactionDone(transaction);
+    }
+
+    public async replaceConflictWithCreate(
+        pending: PendingCreate,
         content: Blob,
     ): Promise<void> {
         const replaced = await this.pendingForPath(pending.path);

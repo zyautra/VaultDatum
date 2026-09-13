@@ -71,6 +71,13 @@ export default class VaultDatumPlugin extends Plugin {
                 void this.openKeepDeletedConflictPicker();
             },
         });
+        this.addCommand({
+            id: "resolve-conflict-restore-local",
+            name: "Resolve conflict: restore Local",
+            callback: () => {
+                void this.openRestoreLocalConflictPicker();
+            },
+        });
 
         this.app.workspace.onLayoutReady(() => {
             this.observeVaultChanges();
@@ -330,6 +337,52 @@ export default class VaultDatumPlugin extends Plugin {
             console.warn("VaultDatum could not prepare the local deletion");
             new Notice(
                 "VaultDatum could not keep that deletion. The conflict was kept.",
+            );
+        }
+    }
+
+    private async openRestoreLocalConflictPicker(): Promise<void> {
+        const store = this.store;
+
+        if (store === undefined) {
+            return;
+        }
+
+        const conflicts = await store.conflicts();
+        if (conflicts.length === 0) {
+            new Notice("VaultDatum has no conflicts to resolve.");
+            return;
+        }
+
+        new ConflictResolutionModal(
+            this.app,
+            conflicts,
+            "Choose a deleted Server path to restore from this device",
+            (conflict) => this.resolveRestoreLocal(conflict),
+        ).open();
+    }
+
+    private async resolveRestoreLocal(conflict: RemoteConflict): Promise<void> {
+        const createSync = this.createSync;
+
+        if (createSync === undefined) {
+            return;
+        }
+
+        try {
+            if (await createSync.resolveRestoreLocal(conflict.path)) {
+                new Notice(
+                    `VaultDatum queued restoration of ${conflict.path}.`,
+                );
+                void this.syncNow(false);
+                return;
+            }
+
+            new Notice("VaultDatum could not find that conflict anymore.");
+        } catch {
+            console.warn("VaultDatum could not prepare the local restoration");
+            new Notice(
+                "VaultDatum could not restore that file. The conflict was kept.",
             );
         }
     }

@@ -2,6 +2,7 @@ package io.vaultdatum.server.sync;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static io.vaultdatum.server.jooq.Tables.OPERATION_BASE_CONDITION;
 import static io.vaultdatum.server.jooq.Tables.OPERATION_CREATE;
 import static io.vaultdatum.server.jooq.Tables.OPERATIONS;
 
@@ -71,7 +72,7 @@ class CreateCoordinatorRecoveryTest {
 
     private void insertPrepared(PreparedCreate prepared) {
         String requestDigest = ContentHash.calculateUtf8(String.join("\u0000",
-                prepared.operationId(), "recovery-client", prepared.path(), prepared.contentHash(),
+                prepared.operationId(), "recovery-client", prepared.path(), "UNKNOWN", "", prepared.contentHash(),
                 Long.toString(prepared.size())));
 
         dsl.transaction(configuration -> {
@@ -93,6 +94,14 @@ class CreateCoordinatorRecoveryTest {
                             "PREPARED",
                             prepared.stagingReference(),
                             Instant.now().toString())
+                    .execute();
+            transaction.insertInto(OPERATION_BASE_CONDITION)
+                    .columns(
+                            OPERATION_BASE_CONDITION.OPERATION_ID,
+                            OPERATION_BASE_CONDITION.ORDINAL,
+                            OPERATION_BASE_CONDITION.PATH,
+                            OPERATION_BASE_CONDITION.EXPECTED_STATE)
+                    .values(prepared.operationId(), 0, prepared.path(), "UNKNOWN")
                     .execute();
             transaction.insertInto(OPERATION_CREATE)
                     .columns(

@@ -3,6 +3,7 @@ import { isSyncPath } from "../core/sync-path";
 import {
     type ApplyIntent,
     ClientStore,
+    type PendingCreate,
     type PendingDelete,
     type PendingModify,
     type PendingOperation,
@@ -185,6 +186,42 @@ export class RemoteApply {
             status: "READY",
         };
         await this.store.replaceConflictWithDelete(pending);
+        return true;
+    }
+
+    public async resolveRestoreLocal(path: string): Promise<boolean> {
+        if ((await this.store.conflict(path)) === undefined) {
+            return false;
+        }
+
+        const serverState = await this.store.replica(path);
+        if (serverState?.state !== "DELETED") {
+            throw new Error(
+                "Restoring local content requires a deleted Server path",
+            );
+        }
+
+        const localContent = await this.localVault.readFile(path);
+        if (localContent === undefined) {
+            throw new Error("Restoring local content requires a local file");
+        }
+
+        const pending: PendingCreate = {
+            operationId: `OP-${crypto.randomUUID()}`,
+            clientId: await this.store.clientId(),
+            type: "CREATE",
+            path,
+            base: { state: "DELETED", revision: serverState.revision },
+            contentHash: await contentHash(localContent),
+            size: localContent.byteLength,
+            artifactId: `artifact-${crypto.randomUUID()}`,
+            createdAt: new Date().toISOString(),
+            status: "READY",
+        };
+        await this.store.replaceConflictWithCreate(
+            pending,
+            new Blob([localContent]),
+        );
         return true;
     }
 

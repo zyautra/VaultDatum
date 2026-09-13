@@ -89,13 +89,27 @@ class ModifyAndDeleteOperationResourceTest {
                 .body("resultRevision", is(deletedRevision))
                 .body("replayed", is(true));
 
+        byte[] restored = "Explicitly restored content".getBytes(StandardCharsets.UTF_8);
+        int restoredRevision = postContent(
+                restoreRequest("OP-" + UUID.randomUUID(), path, deletedRevision, restored),
+                restored)
+                .then()
+                .statusCode(200)
+                .body("resultRevision", greaterThan(deletedRevision))
+                .body("replayed", is(false))
+                .extract()
+                .path("resultRevision");
+        assertEquals("Explicitly restored content", Files.readString(dataDirectories.vault().resolve(path)));
+
         given()
                 .queryParam("after", modifiedRevision)
                 .when().get("/api/v1/changes")
                 .then()
                 .statusCode(200)
                 .body("changes[0].type", is("DELETE"))
-                .body("changes[0].effects[0].state", is("DELETED"));
+                .body("changes[0].effects[0].state", is("DELETED"))
+                .body("changes[1].type", is("CREATE"))
+                .body("changes[1].revision", is(restoredRevision));
     }
 
     private static Response postContent(String metadata, byte[] content) {
@@ -142,5 +156,11 @@ class ModifyAndDeleteOperationResourceTest {
         return """
                 {"operationId":"%s","clientId":"mutation-client","type":"DELETE","path":"%s","base":[{"path":"%s","state":"PRESENT","revision":%d,"contentHash":"%s"}]}
                 """.formatted(operationId, path, path, revision, baseHash);
+    }
+
+    private static String restoreRequest(String operationId, String path, int revision, byte[] content) {
+        return """
+                {"operationId":"%s","clientId":"mutation-client","type":"CREATE","path":"%s","base":[{"path":"%s","state":"DELETED","revision":%d}],"content":{"contentHash":"%s","size":%d}}
+                """.formatted(operationId, path, path, revision, ContentHash.calculate(content), content.length);
     }
 }

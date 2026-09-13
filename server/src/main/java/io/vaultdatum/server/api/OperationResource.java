@@ -6,8 +6,10 @@ import io.vaultdatum.server.config.DataDirectories;
 import io.vaultdatum.server.sync.ContentHash;
 import io.vaultdatum.server.sync.BaseStateMismatchException;
 import io.vaultdatum.server.sync.CreateCoordinator;
+import io.vaultdatum.server.sync.CreateBase;
 import io.vaultdatum.server.sync.CreateOperation;
 import io.vaultdatum.server.sync.CreateOperationResult;
+import io.vaultdatum.server.sync.DeletedCreateBase;
 import io.vaultdatum.server.sync.ModifyCoordinator;
 import io.vaultdatum.server.sync.ModifyOperation;
 import io.vaultdatum.server.sync.OperationResult;
@@ -15,6 +17,7 @@ import io.vaultdatum.server.sync.OperationIdReuseException;
 import io.vaultdatum.server.sync.PresentBase;
 import io.vaultdatum.server.sync.RecoveryRequiredException;
 import io.vaultdatum.server.sync.SyncPath;
+import io.vaultdatum.server.sync.UnknownCreateBase;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 import jakarta.ws.rs.Consumes;
 import jakarta.ws.rs.POST;
@@ -141,19 +144,31 @@ public final class OperationResource {
             ContentMutationRequest request,
             ContentHash.HashedContent actualContent) {
         if (request == null || !"CREATE".equals(request.type()) || request.content() == null
-                || request.base() == null || request.base().length != 1
-                || !"UNKNOWN".equals(request.base()[0].state())) {
-            throw new IllegalArgumentException("Only a CREATE operation with an UNKNOWN base is supported");
+                || request.base() == null || request.base().length != 1) {
+            throw new IllegalArgumentException("A CREATE operation requires one base condition");
         }
 
         SyncPath path = SyncPath.parse(request.path());
         validateCommon(request, path);
+        CreateBase base = createBase(request.base()[0]);
         if (request.content().size() != actualContent.size() || !request.content().contentHash().equals(actualContent.value())) {
             throw new IllegalArgumentException("CREATE content metadata is invalid");
         }
 
         return new CreateOperation(
-                request.operationId(), request.clientId(), path, request.content().contentHash(), request.content().size());
+                request.operationId(), request.clientId(), path, base, request.content().contentHash(), request.content().size());
+    }
+
+    private CreateBase createBase(BaseCondition base) {
+        if ("UNKNOWN".equals(base.state()) && base.revision() == null && base.contentHash() == null) {
+            return UnknownCreateBase.INSTANCE;
+        }
+        if ("DELETED".equals(base.state()) && base.revision() != null && base.revision() >= 1
+                && base.contentHash() == null) {
+            return new DeletedCreateBase(base.revision());
+        }
+
+        throw new IllegalArgumentException("A CREATE base must be UNKNOWN or a revisioned DELETED state");
     }
 
     private ModifyOperation modifyOperation(

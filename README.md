@@ -65,8 +65,10 @@ conflict: use Server** command lets a user explicitly replace one conflicted
 local file with the latest Server version. **Resolve conflict: apply Local**
 turns a conflicted local file into a new MODIFY operation against that latest
 Server version. **Resolve conflict: keep Deleted** turns an already-deleted
-local file into a new DELETE operation against the latest Server file. Other
-conflict-resolution choices remain future work.
+local file into a new DELETE operation against the latest Server file. **Resolve
+conflict: restore Local** creates an explicit restore operation only when the
+latest Server state is a deleted tombstone. Manual merge and keep-both choices
+remain future work.
 
 ## Update Client Protocol Types
 

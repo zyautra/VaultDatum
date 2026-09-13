@@ -132,6 +132,10 @@ export class CreateSync {
         return this.remoteApply.resolveKeepDeleted(path);
     }
 
+    public async resolveRestoreLocal(path: string): Promise<boolean> {
+        return this.remoteApply.resolveRestoreLocal(path);
+    }
+
     private async captureContent(
         path: string,
         content: ArrayBuffer,
@@ -194,6 +198,7 @@ export class CreateSync {
             clientId,
             type: "CREATE",
             path,
+            base: { state: "UNKNOWN" },
             contentHash: hash,
             size: content.byteLength,
             artifactId: `artifact-${crypto.randomUUID()}`,
