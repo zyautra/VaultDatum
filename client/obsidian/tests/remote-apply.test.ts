@@ -5,6 +5,7 @@ import assert from "node:assert/strict";
 import { contentHash } from "../src/core/content-hash";
 import {
     ClientStore,
+    type KeepBothResolution,
     type PendingCreate,
     type PendingDelete,
     type PendingModify,
@@ -647,6 +648,132 @@ async function explicitlyResolvesAConflictByRestoringLocalContent(): Promise<voi
     store.close();
 }
 
+async function explicitlyResolvesACreateConflictByKeepingBothFiles(): Promise<void> {
+    const path = "notes/keep-both.md";
+    const destinationPath = "notes/keep-both (conflict copy).md";
+    const localContent = bytes("Local copy to preserve");
+    const remoteContent = bytes("Server copy to keep");
+    const localHash = await contentHash(localContent);
+    const remoteHash = await contentHash(remoteContent);
+    const source = await pendingCreate(path, localContent, "C-local-client");
+    const store = await ClientStore.open(
+        `test-keep-both-resolution-${crypto.randomUUID()}`,
+    );
+    const vault = new MemoryVault();
+    await vault.writeFile(path, localContent);
+    await store.saveCreate(source, new Blob([localContent]));
+    const apply = new RemoteApply(
+        store,
+        new DownloadTransport(remoteContent),
+        vault,
+    );
+
+    await apply.integrateChange("https://vaultdatum.test", {
+        revision: 12,
+        type: "CREATE",
+        operationId: `OP-${crypto.randomUUID()}`,
+        actor: { type: "CLIENT", clientId: "C-remote-client" },
+        effects: [
+            {
+                path,
+                entryType: "FILE",
+                state: "PRESENT",
+                contentHash: remoteHash,
+                size: remoteContent.byteLength,
+            },
+        ],
+    });
+
+    const resolved = await apply.resolveKeepBoth(
+        "https://vaultdatum.test",
+        path,
+        destinationPath,
+    );
+    const pending = await store.pendingForPath(destinationPath);
+
+    assert.equal(resolved, true);
+    assert.equal(await vault.hash(path), remoteHash);
+    assert.equal(await vault.hash(destinationPath), localHash);
+    assert.equal(await store.hasConflict(path), false);
+    assert.equal(await store.operation(source.operationId), undefined);
+    assert.equal(await store.artifact(source.artifactId), undefined);
+    assert.equal((await store.keepBothResolutions()).length, 0);
+    assert.equal(pending?.type, "CREATE");
+    if (pending?.type !== "CREATE") {
+        throw new Error(
+            "Expected a pending CREATE operation for the local copy",
+        );
+    }
+    assert.deepEqual(pending.base, { state: "UNKNOWN" });
+    assert.equal(pending.contentHash, localHash);
+    assert.equal(
+        (await store.artifact(pending.artifactId)) instanceof Blob,
+        true,
+    );
+    store.close();
+}
+
+async function resumesAnInterruptedKeepBothResolution(): Promise<void> {
+    const path = "notes/keep-both-recovery.md";
+    const destinationPath = "notes/keep-both-recovery (conflict copy).md";
+    const localContent = bytes("Durable local copy");
+    const remoteContent = bytes("Durable server copy");
+    const localHash = await contentHash(localContent);
+    const remoteHash = await contentHash(remoteContent);
+    const source = await pendingCreate(path, localContent, "C-local-client");
+    const copy = await pendingCreate(
+        destinationPath,
+        localContent,
+        "C-local-client",
+    );
+    const resolution: KeepBothResolution = {
+        resolutionId: `keep-both-${crypto.randomUUID()}`,
+        sourcePath: path,
+        pending: copy,
+        phase: "COPYING",
+    };
+    const store = await ClientStore.open(
+        `test-keep-both-recovery-${crypto.randomUUID()}`,
+    );
+    const vault = new MemoryVault();
+    await vault.writeFile(path, localContent);
+    await store.saveCreate(source, new Blob([localContent]));
+    const apply = new RemoteApply(
+        store,
+        new DownloadTransport(remoteContent),
+        vault,
+    );
+
+    await apply.integrateChange("https://vaultdatum.test", {
+        revision: 13,
+        type: "CREATE",
+        operationId: `OP-${crypto.randomUUID()}`,
+        actor: { type: "CLIENT", clientId: "C-remote-client" },
+        effects: [
+            {
+                path,
+                entryType: "FILE",
+                state: "PRESENT",
+                contentHash: remoteHash,
+                size: remoteContent.byteLength,
+            },
+        ],
+    });
+    await store.beginKeepBothResolution(resolution, new Blob([localContent]));
+
+    await apply.recoverKeepBothResolutions("https://vaultdatum.test");
+    const pending = await store.pendingForPath(destinationPath);
+
+    assert.equal(await vault.hash(path), remoteHash);
+    assert.equal(await vault.hash(destinationPath), localHash);
+    assert.equal(await store.hasConflict(path), false);
+    assert.equal(await store.operation(source.operationId), undefined);
+    assert.equal((await store.keepBothResolutions()).length, 0);
+    assert.equal(pending?.operationId, copy.operationId);
+    assert.equal((await store.artifact(copy.artifactId)) instanceof Blob, true);
+    store.close();
+}
+
 class DownloadTransport implements ContentTransport {
     public constructor(private readonly content: ArrayBuffer) {}
 
@@ -947,6 +1074,25 @@ function bytes(value: string): ArrayBuffer {
     return new TextEncoder().encode(value).buffer;
 }
 
+async function pendingCreate(
+    path: string,
+    content: ArrayBuffer,
+    clientId: string,
+): Promise<PendingCreate> {
+    return {
+        operationId: `OP-${crypto.randomUUID()}`,
+        clientId,
+        type: "CREATE",
+        path,
+        base: { state: "UNKNOWN" },
+        contentHash: await contentHash(content),
+        size: content.byteLength,
+        artifactId: `artifact-${crypto.randomUUID()}`,
+        createdAt: new Date().toISOString(),
+        status: "READY",
+    };
+}
+
 await appliesARemoteCreateToAnEmptyVault();
 await preservesAnExistingLocalFileAsAConflict();
 await integratesAnOwnChangeAfterTheOperationResponseWasLost();
@@ -959,3 +1105,5 @@ await explicitlyResolvesAConflictByUsingTheServerVersion();
 await explicitlyResolvesAConflictByApplyingTheLocalVersion();
 await explicitlyResolvesAConflictByKeepingTheLocalDeletion();
 await explicitlyResolvesAConflictByRestoringLocalContent();
+await explicitlyResolvesACreateConflictByKeepingBothFiles();
+await resumesAnInterruptedKeepBothResolution();

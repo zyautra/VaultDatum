@@ -67,6 +67,13 @@ export interface RemoteConflict {
     readonly operationId?: string;
 }
 
+export interface KeepBothResolution {
+    readonly resolutionId: string;
+    readonly sourcePath: string;
+    readonly pending: PendingCreate;
+    readonly phase: "COPYING" | "APPLYING_SERVER";
+}
+
 export class VaultMismatchError extends Error {
     public constructor(expectedVaultId: string, actualVaultId: string) {
         super(
@@ -90,13 +97,14 @@ interface Artifact {
     readonly content: Blob;
 }
 
-const DATABASE_VERSION = 2;
+const DATABASE_VERSION = 3;
 const METADATA_STORE = "metadata";
 const PENDING_STORE = "pending";
 const ARTIFACT_STORE = "artifact";
 const REPLICA_STORE = "replica";
 const APPLY_STORE = "apply";
 const CONFLICT_STORE = "conflict";
+const KEEP_BOTH_STORE = "keep-both";
 
 export class ClientStore {
     private constructor(private readonly database: IDBDatabase) {}
@@ -483,6 +491,69 @@ export class ClientStore {
         await transactionDone(transaction);
     }
 
+    public async keepBothResolutions(): Promise<KeepBothResolution[]> {
+        return (await this.values<KeepBothResolution>(KEEP_BOTH_STORE)).sort(
+            (left, right) =>
+                left.pending.createdAt.localeCompare(right.pending.createdAt),
+        );
+    }
+
+    public async beginKeepBothResolution(
+        resolution: KeepBothResolution,
+        content: Blob,
+    ): Promise<void> {
+        const transaction = this.database.transaction(
+            [KEEP_BOTH_STORE, ARTIFACT_STORE],
+            "readwrite",
+        );
+        transaction.objectStore(ARTIFACT_STORE).put({
+            artifactId: resolution.pending.artifactId,
+            content,
+        } satisfies Artifact);
+        transaction.objectStore(KEEP_BOTH_STORE).put(resolution);
+        await transactionDone(transaction);
+    }
+
+    public async markKeepBothCopyReady(
+        resolution: KeepBothResolution,
+    ): Promise<KeepBothResolution> {
+        if (resolution.phase !== "COPYING") {
+            return resolution;
+        }
+
+        const ready: KeepBothResolution = {
+            ...resolution,
+            phase: "APPLYING_SERVER",
+        };
+        const transaction = this.database.transaction(
+            [KEEP_BOTH_STORE, PENDING_STORE],
+            "readwrite",
+        );
+        transaction.objectStore(PENDING_STORE).put(ready.pending);
+        transaction.objectStore(KEEP_BOTH_STORE).put(ready);
+        await transactionDone(transaction);
+        return ready;
+    }
+
+    public async completeKeepBothResolution(
+        resolution: KeepBothResolution,
+    ): Promise<void> {
+        const replaced = await this.pendingForPath(resolution.sourcePath);
+        const conflicts = await this.conflictsForPath(resolution.sourcePath);
+        const transaction = this.database.transaction(
+            [KEEP_BOTH_STORE, CONFLICT_STORE, PENDING_STORE, ARTIFACT_STORE],
+            "readwrite",
+        );
+        this.discardPendingInTransaction(transaction, replaced);
+        for (const conflict of conflicts) {
+            transaction.objectStore(CONFLICT_STORE).delete(conflict.conflictId);
+        }
+        transaction
+            .objectStore(KEEP_BOTH_STORE)
+            .delete(resolution.resolutionId);
+        await transactionDone(transaction);
+    }
+
     public async recordRemoteConflict(
         conflict: RemoteConflict,
         serverState: ReplicaEntry,
@@ -633,6 +704,11 @@ function openDatabase(databaseName: string): Promise<IDBDatabase> {
                     keyPath: "conflictId",
                 });
                 conflict.createIndex("path", "path", { unique: false });
+            }
+            if (!database.objectStoreNames.contains(KEEP_BOTH_STORE)) {
+                database.createObjectStore(KEEP_BOTH_STORE, {
+                    keyPath: "resolutionId",
+                });
             }
         };
         request.onsuccess = (): void => resolve(request.result);

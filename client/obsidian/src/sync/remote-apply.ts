@@ -3,6 +3,7 @@ import { isSyncPath } from "../core/sync-path";
 import {
     type ApplyIntent,
     ClientStore,
+    type KeepBothResolution,
     type PendingCreate,
     type PendingDelete,
     type PendingModify,
@@ -75,6 +76,7 @@ export class RemoteApply {
     public async resolveUseServer(
         serverUrl: string,
         path: string,
+        keepBothResolution?: KeepBothResolution,
     ): Promise<boolean> {
         if ((await this.store.conflict(path)) === undefined) {
             return false;
@@ -97,8 +99,89 @@ export class RemoteApply {
             return false;
         }
 
-        await this.store.discardPendingAndClearConflicts(path);
+        if (keepBothResolution === undefined) {
+            await this.store.discardPendingAndClearConflicts(path);
+        } else {
+            await this.store.completeKeepBothResolution(keepBothResolution);
+        }
         return true;
+    }
+
+    public async resolveKeepBoth(
+        serverUrl: string,
+        path: string,
+        destinationPath: string,
+    ): Promise<boolean> {
+        if ((await this.store.conflict(path)) === undefined) {
+            return false;
+        }
+        if (!isSyncPath(destinationPath) || destinationPath === path) {
+            throw new Error("The local copy needs a different valid sync path");
+        }
+        if ((await this.localVault.readFile(destinationPath)) !== undefined) {
+            throw new Error("The local copy path already exists");
+        }
+        if (
+            (await this.store.replica(destinationPath)) !== undefined ||
+            (await this.store.pendingForPath(destinationPath)) !== undefined ||
+            (await this.store.hasConflict(destinationPath))
+        ) {
+            throw new Error(
+                "The local copy path is already known to synchronization",
+            );
+        }
+
+        const serverState = await this.store.replica(path);
+        if (
+            serverState?.entryType !== "FILE" ||
+            serverState.state !== "PRESENT"
+        ) {
+            throw new Error(
+                "Keeping both files requires a present Server file",
+            );
+        }
+
+        const localContent = await this.localVault.readFile(path);
+        if (localContent === undefined) {
+            throw new Error("Keeping both files requires a local file");
+        }
+
+        const pending: PendingCreate = {
+            operationId: `OP-${crypto.randomUUID()}`,
+            clientId: await this.store.clientId(),
+            type: "CREATE",
+            path: destinationPath,
+            base: { state: "UNKNOWN" },
+            contentHash: await contentHash(localContent),
+            size: localContent.byteLength,
+            artifactId: `artifact-${crypto.randomUUID()}`,
+            createdAt: new Date().toISOString(),
+            status: "READY",
+        };
+        const resolution: KeepBothResolution = {
+            resolutionId: `keep-both-${crypto.randomUUID()}`,
+            sourcePath: path,
+            pending,
+            phase: "COPYING",
+        };
+        await this.store.beginKeepBothResolution(
+            resolution,
+            new Blob([localContent]),
+        );
+        return this.continueKeepBothResolution(serverUrl, resolution);
+    }
+
+    public async recoverKeepBothResolutions(serverUrl: string): Promise<void> {
+        for (const resolution of await this.store.keepBothResolutions()) {
+            try {
+                await this.continueKeepBothResolution(serverUrl, resolution);
+            } catch (error: unknown) {
+                console.warn(
+                    "VaultDatum could not resume a keep-both resolution",
+                    error,
+                );
+            }
+        }
     }
 
     public async resolveApplyLocal(path: string): Promise<boolean> {
@@ -223,6 +306,59 @@ export class RemoteApply {
             new Blob([localContent]),
         );
         return true;
+    }
+
+    private async continueKeepBothResolution(
+        serverUrl: string,
+        resolution: KeepBothResolution,
+    ): Promise<boolean> {
+        const artifact = await this.store.artifact(
+            resolution.pending.artifactId,
+        );
+        if (artifact === undefined) {
+            throw new Error("The local copy content is no longer available");
+        }
+
+        const copyContent = await artifact.arrayBuffer();
+        if (
+            copyContent.byteLength !== resolution.pending.size ||
+            (await contentHash(copyContent)) !== resolution.pending.contentHash
+        ) {
+            throw new Error("The durable local copy content is invalid");
+        }
+
+        const destinationContent = await this.localVault.readFile(
+            resolution.pending.path,
+        );
+        if (destinationContent === undefined) {
+            await this.localVault.writeFile(
+                resolution.pending.path,
+                copyContent,
+            );
+        } else if (
+            (await contentHash(destinationContent)) !==
+            resolution.pending.contentHash
+        ) {
+            throw new Error(
+                "The local copy path changed before it was synchronized",
+            );
+        }
+
+        const ready = await this.store.markKeepBothCopyReady(resolution);
+        if ((await this.store.conflict(ready.sourcePath)) === undefined) {
+            if (
+                matches(
+                    await this.store.replica(ready.sourcePath),
+                    await this.localHash(ready.sourcePath),
+                )
+            ) {
+                await this.store.completeKeepBothResolution(ready);
+                return true;
+            }
+            return false;
+        }
+
+        return this.resolveUseServer(serverUrl, ready.sourcePath, ready);
     }
 
     private async integrateEffect(

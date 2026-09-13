@@ -136,6 +136,25 @@ export class CreateSync {
         return this.remoteApply.resolveRestoreLocal(path);
     }
 
+    public async resolveKeepBoth(
+        path: string,
+        destinationPath: string,
+    ): Promise<boolean> {
+        const serverUrl = this.serverUrl();
+
+        if (serverUrl.length === 0) {
+            throw new Error(
+                "A server URL is required to keep both file versions",
+            );
+        }
+
+        return this.remoteApply.resolveKeepBoth(
+            serverUrl,
+            path,
+            destinationPath,
+        );
+    }
+
     private async captureContent(
         path: string,
         content: ArrayBuffer,
@@ -223,6 +242,8 @@ export class CreateSync {
             if (beforePush.unavailable) {
                 return unavailable(0, beforePush.conflicted);
             }
+
+            await this.remoteApply.recoverKeepBothResolutions(serverUrl);
 
             const pushed = await this.push(serverUrl);
             if (pushed.offline) {

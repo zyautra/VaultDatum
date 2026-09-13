@@ -67,8 +67,9 @@ turns a conflicted local file into a new MODIFY operation against that latest
 Server version. **Resolve conflict: keep Deleted** turns an already-deleted
 local file into a new DELETE operation against the latest Server file. **Resolve
 conflict: restore Local** creates an explicit restore operation only when the
-latest Server state is a deleted tombstone. Manual merge and keep-both choices
-remain future work.
+latest Server state is a deleted tombstone. **Resolve conflict: keep Both**
+keeps the Server file at its original path and queues this device's content as a
+new file at a user-selected path. Manual merge remains future work.
 
 ## Update Client Protocol Types
 

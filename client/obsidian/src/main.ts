@@ -1,6 +1,7 @@
 import {
     App,
     FuzzySuggestModal,
+    Modal,
     Notice,
     Plugin,
     PluginSettingTab,
@@ -76,6 +77,13 @@ export default class VaultDatumPlugin extends Plugin {
             name: "Resolve conflict: restore Local",
             callback: () => {
                 void this.openRestoreLocalConflictPicker();
+            },
+        });
+        this.addCommand({
+            id: "resolve-conflict-keep-both",
+            name: "Resolve conflict: keep Both",
+            callback: () => {
+                void this.openKeepBothConflictPicker();
             },
         });
 
@@ -387,6 +395,70 @@ export default class VaultDatumPlugin extends Plugin {
         }
     }
 
+    private async openKeepBothConflictPicker(): Promise<void> {
+        const store = this.store;
+
+        if (store === undefined) {
+            return;
+        }
+
+        const conflicts = await store.conflicts();
+        if (conflicts.length === 0) {
+            new Notice("VaultDatum has no conflicts to resolve.");
+            return;
+        }
+
+        new ConflictResolutionModal(
+            this.app,
+            conflicts,
+            "Choose a conflict to keep as a second local file",
+            (conflict) => this.openKeepBothDestination(conflict),
+        ).open();
+    }
+
+    private async openKeepBothDestination(
+        conflict: RemoteConflict,
+    ): Promise<void> {
+        new KeepBothDestinationModal(
+            this.app,
+            conflict.path,
+            (destinationPath) =>
+                this.resolveKeepBoth(conflict, destinationPath),
+        ).open();
+    }
+
+    private async resolveKeepBoth(
+        conflict: RemoteConflict,
+        destinationPath: string,
+    ): Promise<boolean> {
+        const createSync = this.createSync;
+
+        if (createSync === undefined) {
+            return false;
+        }
+
+        try {
+            if (
+                await createSync.resolveKeepBoth(conflict.path, destinationPath)
+            ) {
+                new Notice(
+                    `VaultDatum queued ${destinationPath} and restored ${conflict.path} from the Server.`,
+                );
+                void this.syncNow(false);
+                return true;
+            }
+
+            new Notice("VaultDatum could not find that conflict anymore.");
+            return false;
+        } catch {
+            console.warn("VaultDatum could not keep both file versions");
+            new Notice(
+                "VaultDatum could not keep both files. The conflict was kept.",
+            );
+            return false;
+        }
+    }
+
     private showSyncResult(summary: SyncSummary): void {
         if (summary.vaultMismatch) {
             new Notice(
@@ -512,6 +584,58 @@ class ConflictResolutionModal extends FuzzySuggestModal<RemoteConflict> {
     }
 }
 
+class KeepBothDestinationModal extends Modal {
+    private destinationPath: string;
+
+    public constructor(
+        app: App,
+        sourcePath: string,
+        private readonly choose: (destinationPath: string) => Promise<boolean>,
+    ) {
+        super(app);
+        this.destinationPath = conflictCopyPath(sourcePath);
+    }
+
+    public onOpen(): void {
+        this.setTitle("Keep both file versions");
+        this.contentEl.createEl("p", {
+            text: "Choose where to save this device's copy. The Server version remains at the original path.",
+        });
+        new Setting(this.contentEl)
+            .setName("Local copy path")
+            .setDesc("A new Vault-relative path for this device's version.")
+            .addText((text) => {
+                text.setValue(this.destinationPath)
+                    .onChange((value) => {
+                        this.destinationPath = value.trim();
+                    })
+                    .inputEl.select();
+            });
+        new Setting(this.contentEl)
+            .addButton((button) =>
+                button.setButtonText("Cancel").onClick(() => this.close()),
+            )
+            .addButton((button) =>
+                button
+                    .setButtonText("Keep both")
+                    .setCta()
+                    .onClick(() => {
+                        void this.choose(this.destinationPath).then(
+                            (resolved) => {
+                                if (resolved) {
+                                    this.close();
+                                }
+                            },
+                        );
+                    }),
+            );
+    }
+
+    public onClose(): void {
+        this.contentEl.empty();
+    }
+}
+
 class VaultDatumSettingTab extends PluginSettingTab {
     public constructor(
         app: App,
@@ -553,4 +677,17 @@ function readSettings(value: unknown): VaultDatumSettings {
                 ? stored.databaseName
                 : DEFAULT_SETTINGS.databaseName,
     };
+}
+
+function conflictCopyPath(path: string): string {
+    const slash = path.lastIndexOf("/");
+    const directory = slash === -1 ? "" : path.slice(0, slash + 1);
+    const filename = path.slice(slash + 1);
+    const extension = filename.lastIndexOf(".");
+
+    if (extension <= 0) {
+        return `${directory}${filename} (conflict copy)`;
+    }
+
+    return `${directory}${filename.slice(0, extension)} (conflict copy)${filename.slice(extension)}`;
 }
