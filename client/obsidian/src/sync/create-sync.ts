@@ -124,6 +124,10 @@ export class CreateSync {
         return this.remoteApply.resolveUseServer(serverUrl, path);
     }
 
+    public async resolveApplyLocal(path: string): Promise<boolean> {
+        return this.remoteApply.resolveApplyLocal(path);
+    }
+
     private async captureContent(
         path: string,
         content: ArrayBuffer,

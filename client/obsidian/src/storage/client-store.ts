@@ -390,9 +390,7 @@ export class ClientStore {
     }
 
     public async clearConflicts(path: string): Promise<void> {
-        const conflicts = (await this.conflicts()).filter(
-            (conflict) => conflict.path === path,
-        );
+        const conflicts = await this.conflictsForPath(path);
         if (conflicts.length === 0) {
             return;
         }
@@ -404,6 +402,42 @@ export class ClientStore {
         for (const conflict of conflicts) {
             transaction.objectStore(CONFLICT_STORE).delete(conflict.conflictId);
         }
+        await transactionDone(transaction);
+    }
+
+    public async discardPendingAndClearConflicts(path: string): Promise<void> {
+        const pending = await this.pendingForPath(path);
+        const conflicts = await this.conflictsForPath(path);
+        const transaction = this.database.transaction(
+            [CONFLICT_STORE, PENDING_STORE, ARTIFACT_STORE],
+            "readwrite",
+        );
+        this.discardPendingInTransaction(transaction, pending);
+        for (const conflict of conflicts) {
+            transaction.objectStore(CONFLICT_STORE).delete(conflict.conflictId);
+        }
+        await transactionDone(transaction);
+    }
+
+    public async replaceConflictWithModify(
+        pending: PendingModify,
+        content: Blob,
+    ): Promise<void> {
+        const replaced = await this.pendingForPath(pending.path);
+        const conflicts = await this.conflictsForPath(pending.path);
+        const transaction = this.database.transaction(
+            [CONFLICT_STORE, PENDING_STORE, ARTIFACT_STORE],
+            "readwrite",
+        );
+        this.discardPendingInTransaction(transaction, replaced);
+        for (const conflict of conflicts) {
+            transaction.objectStore(CONFLICT_STORE).delete(conflict.conflictId);
+        }
+        transaction.objectStore(ARTIFACT_STORE).put({
+            artifactId: pending.artifactId,
+            content,
+        } satisfies Artifact);
+        transaction.objectStore(PENDING_STORE).put(pending);
         await transactionDone(transaction);
     }
 
@@ -442,6 +476,26 @@ export class ClientStore {
 
     private async pendingRecords(): Promise<PendingOperation[]> {
         return this.values<PendingOperation>(PENDING_STORE);
+    }
+
+    private async conflictsForPath(path: string): Promise<RemoteConflict[]> {
+        return (await this.conflicts()).filter(
+            (conflict) => conflict.path === path,
+        );
+    }
+
+    private discardPendingInTransaction(
+        transaction: IDBTransaction,
+        pending: PendingOperation | undefined,
+    ): void {
+        if (pending === undefined) {
+            return;
+        }
+
+        transaction.objectStore(PENDING_STORE).delete(pending.operationId);
+        if (isContentOperation(pending)) {
+            transaction.objectStore(ARTIFACT_STORE).delete(pending.artifactId);
+        }
     }
 
     private async pending(

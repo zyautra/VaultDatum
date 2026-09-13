@@ -62,8 +62,9 @@ local content becomes a conflict; it is never overwritten.
 This slice does not yet import an existing Vault, synchronize rename or move
 operations, or restore a locally recreated tombstoned path. The **Resolve
 conflict: use Server** command lets a user explicitly replace one conflicted
-local file with the latest Server version. Other conflict-resolution choices
-remain future work.
+local file with the latest Server version. **Resolve conflict: apply Local**
+turns a conflicted local file into a new MODIFY operation against that latest
+Server version. Other conflict-resolution choices remain future work.
 
 ## Update Client Protocol Types
 

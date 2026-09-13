@@ -3,6 +3,7 @@ import { isSyncPath } from "../core/sync-path";
 import {
     type ApplyIntent,
     ClientStore,
+    type PendingModify,
     type PendingOperation,
     type ReplicaEntry,
     type RemoteConflict,
@@ -94,11 +95,54 @@ export class RemoteApply {
             return false;
         }
 
-        const pending = await this.store.pendingForPath(path);
-        if (pending !== undefined) {
-            await this.store.discardPending(pending.operationId);
+        await this.store.discardPendingAndClearConflicts(path);
+        return true;
+    }
+
+    public async resolveApplyLocal(path: string): Promise<boolean> {
+        if ((await this.store.conflict(path)) === undefined) {
+            return false;
         }
-        await this.store.clearConflicts(path);
+
+        const serverState = await this.store.replica(path);
+        if (
+            serverState?.entryType !== "FILE" ||
+            serverState.state !== "PRESENT" ||
+            serverState.contentHash === undefined
+        ) {
+            throw new Error(
+                "Applying local content requires a present Server file",
+            );
+        }
+
+        const localContent = await this.localVault.readFile(path);
+        if (localContent === undefined) {
+            throw new Error("Applying local content requires a local file");
+        }
+
+        const localContentHash = await contentHash(localContent);
+        if (localContentHash === serverState.contentHash) {
+            await this.store.discardPendingAndClearConflicts(path);
+            return true;
+        }
+
+        const pending: PendingModify = {
+            operationId: `OP-${crypto.randomUUID()}`,
+            clientId: await this.store.clientId(),
+            type: "MODIFY",
+            path,
+            baseRevision: serverState.revision,
+            baseContentHash: serverState.contentHash,
+            contentHash: localContentHash,
+            size: localContent.byteLength,
+            artifactId: `artifact-${crypto.randomUUID()}`,
+            createdAt: new Date().toISOString(),
+            status: "READY",
+        };
+        await this.store.replaceConflictWithModify(
+            pending,
+            new Blob([localContent]),
+        );
         return true;
     }
 

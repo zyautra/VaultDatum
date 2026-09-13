@@ -454,6 +454,73 @@ async function explicitlyResolvesAConflictByUsingTheServerVersion(): Promise<voi
     store.close();
 }
 
+async function explicitlyResolvesAConflictByApplyingTheLocalVersion(): Promise<void> {
+    const path = "notes/apply-local.md";
+    const localContent = bytes("Local selected content");
+    const remoteContent = bytes("Server conflicting content");
+    const localHash = await contentHash(localContent);
+    const remoteHash = await contentHash(remoteContent);
+    const discarded: PendingCreate = {
+        operationId: `OP-${crypto.randomUUID()}`,
+        clientId: "C-local-client",
+        type: "CREATE",
+        path,
+        contentHash: localHash,
+        size: localContent.byteLength,
+        artifactId: `artifact-${crypto.randomUUID()}`,
+        createdAt: new Date().toISOString(),
+        status: "READY",
+    };
+    const store = await ClientStore.open(
+        `test-apply-local-resolution-${crypto.randomUUID()}`,
+    );
+    const vault = new MemoryVault();
+    await vault.writeFile(path, localContent);
+    await store.saveCreate(discarded, new Blob([localContent]));
+    const apply = new RemoteApply(
+        store,
+        new DownloadTransport(remoteContent),
+        vault,
+    );
+
+    await apply.integrateChange("https://vaultdatum.test", {
+        revision: 7,
+        type: "CREATE",
+        operationId: `OP-${crypto.randomUUID()}`,
+        actor: { type: "CLIENT", clientId: "C-remote-client" },
+        effects: [
+            {
+                path,
+                entryType: "FILE",
+                state: "PRESENT",
+                contentHash: remoteHash,
+                size: remoteContent.byteLength,
+            },
+        ],
+    });
+
+    const resolved = await apply.resolveApplyLocal(path);
+    const pending = await store.pendingForPath(path);
+
+    assert.equal(resolved, true);
+    assert.equal(await vault.hash(path), localHash);
+    assert.equal(await store.hasConflict(path), false);
+    assert.equal(await store.operation(discarded.operationId), undefined);
+    assert.equal(await store.artifact(discarded.artifactId), undefined);
+    assert.equal(pending?.type, "MODIFY");
+    if (pending?.type !== "MODIFY") {
+        throw new Error("Expected a pending MODIFY operation");
+    }
+    assert.equal(pending.baseRevision, 7);
+    assert.equal(pending.baseContentHash, remoteHash);
+    assert.equal(pending.contentHash, localHash);
+    assert.equal(
+        (await store.artifact(pending.artifactId)) instanceof Blob,
+        true,
+    );
+    store.close();
+}
+
 class DownloadTransport implements ContentTransport {
     public constructor(private readonly content: ArrayBuffer) {}
 
@@ -763,3 +830,4 @@ await pullsTheLatestContentAfterAnOwnIntermediateChange();
 await retriesAnInFlightCreateAfterAStoreRestart();
 await continuesPullingUnrelatedPathsAfterAConflict();
 await explicitlyResolvesAConflictByUsingTheServerVersion();
+await explicitlyResolvesAConflictByApplyingTheLocalVersion();

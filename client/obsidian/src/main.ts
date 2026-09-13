@@ -57,6 +57,13 @@ export default class VaultDatumPlugin extends Plugin {
                 void this.openUseServerConflictPicker();
             },
         });
+        this.addCommand({
+            id: "resolve-conflict-apply-local",
+            name: "Resolve conflict: apply Local",
+            callback: () => {
+                void this.openApplyLocalConflictPicker();
+            },
+        });
 
         this.app.workspace.onLayoutReady(() => {
             this.observeVaultChanges();
@@ -197,8 +204,11 @@ export default class VaultDatumPlugin extends Plugin {
             return;
         }
 
-        new UseServerConflictModal(this.app, conflicts, (conflict) =>
-            this.resolveUseServer(conflict),
+        new ConflictResolutionModal(
+            this.app,
+            conflicts,
+            "Choose a conflict to replace with the Server version",
+            (conflict) => this.resolveUseServer(conflict),
         ).open();
     }
 
@@ -223,6 +233,52 @@ export default class VaultDatumPlugin extends Plugin {
             console.warn("VaultDatum could not apply the Server version");
             new Notice(
                 "VaultDatum could not apply the Server version. The conflict was kept.",
+            );
+        }
+    }
+
+    private async openApplyLocalConflictPicker(): Promise<void> {
+        const store = this.store;
+
+        if (store === undefined) {
+            return;
+        }
+
+        const conflicts = await store.conflicts();
+        if (conflicts.length === 0) {
+            new Notice("VaultDatum has no conflicts to resolve.");
+            return;
+        }
+
+        new ConflictResolutionModal(
+            this.app,
+            conflicts,
+            "Choose a conflict to apply as a new local change",
+            (conflict) => this.resolveApplyLocal(conflict),
+        ).open();
+    }
+
+    private async resolveApplyLocal(conflict: RemoteConflict): Promise<void> {
+        const createSync = this.createSync;
+
+        if (createSync === undefined) {
+            return;
+        }
+
+        try {
+            if (await createSync.resolveApplyLocal(conflict.path)) {
+                new Notice(
+                    `VaultDatum queued ${conflict.path} as a new local change.`,
+                );
+                void this.syncNow(false);
+                return;
+            }
+
+            new Notice("VaultDatum could not find that conflict anymore.");
+        } catch {
+            console.warn("VaultDatum could not prepare the local version");
+            new Notice(
+                "VaultDatum could not apply the local version. The conflict was kept.",
             );
         }
     }
@@ -328,16 +384,15 @@ class ObsidianLocalVault implements LocalVault {
     }
 }
 
-class UseServerConflictModal extends FuzzySuggestModal<RemoteConflict> {
+class ConflictResolutionModal extends FuzzySuggestModal<RemoteConflict> {
     public constructor(
         app: App,
         private readonly conflicts: readonly RemoteConflict[],
+        placeholder: string,
         private readonly choose: (conflict: RemoteConflict) => Promise<void>,
     ) {
         super(app);
-        this.setPlaceholder(
-            "Choose a conflict to replace with the Server version",
-        );
+        this.setPlaceholder(placeholder);
     }
 
     public getItems(): RemoteConflict[] {
