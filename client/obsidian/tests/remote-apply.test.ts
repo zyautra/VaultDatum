@@ -10,6 +10,7 @@ import {
     type PendingCreate,
     type PendingDelete,
     type PendingModify,
+    type PendingRename,
 } from "../src/storage/client-store";
 import { CreateSync } from "../src/sync/create-sync";
 import { type LocalVault, RemoteApply } from "../src/sync/remote-apply";
@@ -202,6 +203,110 @@ async function queuesModifyThenDeleteAgainstTheSameReplicaBase(): Promise<void> 
     assert.equal(deletedOperation?.baseRevision, 8);
     assert.equal(deletedOperation?.baseContentHash, initialHash);
     assert.equal(await store.operation(modify.operationId), undefined);
+    store.close();
+}
+
+async function queuesAndObservesAnOwnRenameAsOneOperation(): Promise<void> {
+    const sourcePath = "notes/rename-source.md";
+    const destinationPath = "archive/rename-destination.md";
+    const content = bytes("Rename this local file");
+    const hash = await contentHash(content);
+    const store = await ClientStore.open(
+        `test-local-rename-${crypto.randomUUID()}`,
+    );
+    const vault = new MemoryVault();
+    await vault.writeFile(sourcePath, content);
+    await store.putReplica({
+        path: sourcePath,
+        entryType: "FILE",
+        state: "PRESENT",
+        revision: 8,
+        contentHash: hash,
+        size: content.byteLength,
+    });
+    const sync = new CreateSync(store, new NoopTransport(), vault, () => "");
+
+    const pending = await sync.captureRename(sourcePath, destinationPath);
+
+    assert.equal(pending?.type, "RENAME");
+    if (pending?.type !== "RENAME") {
+        throw new Error("Expected a pending RENAME operation");
+    }
+    assert.equal(pending.path, sourcePath);
+    assert.equal(pending.destinationPath, destinationPath);
+    assert.equal(pending.baseRevision, 8);
+    assert.equal(pending.baseContentHash, hash);
+
+    await vault.removeFile(sourcePath);
+    await vault.writeFile(destinationPath, content);
+    const apply = new RemoteApply(store, new DownloadTransport(content), vault);
+    const result = await apply.integrateChange("https://vaultdatum.test", {
+        revision: 9,
+        type: "RENAME",
+        operationId: pending.operationId,
+        actor: { type: "CLIENT", clientId: pending.clientId },
+        effects: [
+            { path: sourcePath, entryType: "FILE", state: "DELETED" },
+            {
+                path: destinationPath,
+                entryType: "FILE",
+                state: "PRESENT",
+                contentHash: hash,
+                size: content.byteLength,
+            },
+        ],
+    });
+
+    assert.equal(result.conflicted, 0);
+    assert.equal(await store.operation(pending.operationId), undefined);
+    assert.equal((await store.replica(sourcePath))?.state, "DELETED");
+    assert.equal((await store.replica(destinationPath))?.contentHash, hash);
+    store.close();
+}
+
+async function isolatesBothPathsWhenARemoteRenameOverlapsLocalContent(): Promise<void> {
+    const sourcePath = "notes/remote-rename-source.md";
+    const destinationPath = "archive/remote-rename-destination.md";
+    const base = bytes("Base content");
+    const local = bytes("Local unsynchronized content");
+    const hash = await contentHash(base);
+    const store = await ClientStore.open(
+        `test-remote-rename-conflict-${crypto.randomUUID()}`,
+    );
+    const vault = new MemoryVault();
+    await vault.writeFile(sourcePath, local);
+    await store.putReplica({
+        path: sourcePath,
+        entryType: "FILE",
+        state: "PRESENT",
+        revision: 4,
+        contentHash: hash,
+        size: base.byteLength,
+    });
+    const apply = new RemoteApply(store, new DownloadTransport(base), vault);
+
+    const result = await apply.integrateChange("https://vaultdatum.test", {
+        revision: 5,
+        type: "RENAME",
+        operationId: `OP-${crypto.randomUUID()}`,
+        actor: { type: "CLIENT", clientId: "C-remote-client" },
+        effects: [
+            { path: sourcePath, entryType: "FILE", state: "DELETED" },
+            {
+                path: destinationPath,
+                entryType: "FILE",
+                state: "PRESENT",
+                contentHash: hash,
+                size: base.byteLength,
+            },
+        ],
+    });
+
+    assert.equal(result.conflicted, 2);
+    assert.equal(await vault.hash(sourcePath), await contentHash(local));
+    assert.equal(await vault.readFile(destinationPath), undefined);
+    assert.equal(await store.hasConflict(sourcePath), true);
+    assert.equal(await store.hasConflict(destinationPath), true);
     store.close();
 }
 
@@ -979,6 +1084,15 @@ class NoopTransport implements SyncTransport {
         void pending;
         return { kind: "UNAVAILABLE" };
     }
+
+    public async submitRename(
+        serverUrl: string,
+        pending: PendingRename,
+    ): Promise<SubmitOperationResult> {
+        void serverUrl;
+        void pending;
+        return { kind: "UNAVAILABLE" };
+    }
 }
 
 class HistoryTransport extends DownloadTransport implements SyncTransport {
@@ -1052,6 +1166,15 @@ class HistoryTransport extends DownloadTransport implements SyncTransport {
     public async submitDelete(
         serverUrl: string,
         pending: PendingDelete,
+    ): Promise<SubmitOperationResult> {
+        void serverUrl;
+        void pending;
+        return { kind: "UNAVAILABLE" };
+    }
+
+    public async submitRename(
+        serverUrl: string,
+        pending: PendingRename,
     ): Promise<SubmitOperationResult> {
         void serverUrl;
         void pending;
@@ -1244,6 +1367,8 @@ await preservesAnExistingLocalFileAsAConflict();
 await integratesAnOwnChangeAfterTheOperationResponseWasLost();
 await appliesARemoteDeleteToAMatchingReplica();
 await queuesModifyThenDeleteAgainstTheSameReplicaBase();
+await queuesAndObservesAnOwnRenameAsOneOperation();
+await isolatesBothPathsWhenARemoteRenameOverlapsLocalContent();
 await pullsTheLatestContentAfterAnOwnIntermediateChange();
 await retriesAnInFlightCreateAfterAStoreRestart();
 await continuesPullingUnrelatedPathsAfterAConflict();

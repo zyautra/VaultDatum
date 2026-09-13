@@ -6,6 +6,7 @@ import {
     type PendingDelete,
     type PendingModify,
     type PendingOperation,
+    type PendingRename,
     type ReplicaEntry,
     VaultMismatchError,
 } from "../storage/client-store";
@@ -106,6 +107,46 @@ export class CreateSync {
         return pending;
     }
 
+    public async captureRename(
+        sourcePath: string,
+        destinationPath: string,
+    ): Promise<PendingRename | undefined> {
+        if (
+            !isSyncPath(sourcePath) ||
+            !isSyncPath(destinationPath) ||
+            sourcePath === destinationPath ||
+            (await this.store.hasConflict(sourcePath)) ||
+            (await this.store.hasConflict(destinationPath)) ||
+            (await this.store.findActiveOperation(sourcePath)) !== undefined ||
+            (await this.store.findActiveOperation(destinationPath)) !==
+                undefined
+        ) {
+            return undefined;
+        }
+
+        const source = await this.store.replica(sourcePath);
+        if (!isPresentFile(source)) {
+            return undefined;
+        }
+        if ((await this.store.replica(destinationPath)) !== undefined) {
+            return undefined;
+        }
+
+        const pending: PendingRename = {
+            operationId: `OP-${crypto.randomUUID()}`,
+            clientId: await this.store.clientId(),
+            type: "RENAME",
+            path: sourcePath,
+            destinationPath,
+            baseRevision: source.revision,
+            baseContentHash: source.contentHash,
+            createdAt: new Date().toISOString(),
+            status: "READY",
+        };
+        await this.store.saveRename(pending);
+        return pending;
+    }
+
     public sync(): Promise<SyncSummary> {
         if (this.activeSync === undefined) {
             this.activeSync = this.runSync().finally(() => {
@@ -197,6 +238,9 @@ export class CreateSync {
         const active = await this.store.findActiveOperation(path);
         if (active !== undefined) {
             if (active.type === "DELETE") {
+                return active;
+            }
+            if (active.type === "RENAME") {
                 return active;
             }
             const updated = {
@@ -444,6 +488,9 @@ export class CreateSync {
     ): Promise<SubmitOperationResult> {
         if (pending.type === "DELETE") {
             return this.serverClient.submitDelete(serverUrl, pending);
+        }
+        if (pending.type === "RENAME") {
+            return this.serverClient.submitRename(serverUrl, pending);
         }
 
         const artifact = await this.store.artifact(pending.artifactId);

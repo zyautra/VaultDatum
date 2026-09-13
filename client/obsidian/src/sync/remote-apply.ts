@@ -68,6 +68,15 @@ export class RemoteApply {
         serverUrl: string,
         change: RemoteChange,
     ): Promise<RemoteIntegration> {
+        const submitted = await this.store.operation(change.operationId);
+
+        if (submitted?.type === "RENAME" && isOwnChange(change, submitted)) {
+            return this.integrateOwnRename(change, submitted);
+        }
+        if (change.type === "RENAME" || change.type === "MOVE") {
+            return this.integrateRemoteRename(serverUrl, change);
+        }
+
         let conflicted = 0;
 
         for (const effect of change.effects) {
@@ -76,6 +85,94 @@ export class RemoteApply {
             }
         }
 
+        return { conflicted };
+    }
+
+    private async integrateOwnRename(
+        change: RemoteChange,
+        pending: PendingOperation,
+    ): Promise<RemoteIntegration> {
+        let conflicted = 0;
+
+        for (const effect of change.effects) {
+            if (!isSyncPath(effect.path)) {
+                throw new Error("Server returned an invalid sync path");
+            }
+            const after = replicaEntry(change.revision, effect);
+            const actual = await this.localHash(effect.path);
+            if (!matches(after, actual)) {
+                await this.recordConflict(
+                    effect.path,
+                    after,
+                    "LOCAL_STATE_DIVERGED_AFTER_COMMIT",
+                    pending,
+                    change.operationId,
+                );
+                conflicted += 1;
+                continue;
+            }
+            await this.store.putReplica(after);
+        }
+
+        if (conflicted === 0) {
+            await this.store.completeObservedOperation(change.operationId);
+        }
+        return { conflicted };
+    }
+
+    private async integrateRemoteRename(
+        serverUrl: string,
+        change: RemoteChange,
+    ): Promise<RemoteIntegration> {
+        let unsafe = false;
+        const effects: Array<{
+            readonly effect: RemoteChangeEffect;
+            readonly after: ReplicaEntry;
+            readonly pending: PendingOperation | undefined;
+        }> = [];
+
+        for (const effect of change.effects) {
+            if (!isSyncPath(effect.path)) {
+                throw new Error("Server returned an invalid sync path");
+            }
+            const after = replicaEntry(change.revision, effect);
+            const pending = await this.store.pendingForPath(effect.path);
+            if (
+                (await this.store.hasConflict(effect.path)) ||
+                pending !== undefined ||
+                !matches(
+                    await this.store.replica(effect.path),
+                    await this.localHash(effect.path),
+                )
+            ) {
+                unsafe = true;
+            }
+            effects.push({ effect, after, pending });
+        }
+
+        if (unsafe) {
+            for (const { after, pending } of effects) {
+                if (await this.store.hasConflict(after.path)) {
+                    await this.store.putReplica(after);
+                    continue;
+                }
+                await this.recordConflict(
+                    after.path,
+                    after,
+                    "REMOTE_RENAME_OVERLAPS_LOCAL_STATE",
+                    pending,
+                    change.operationId,
+                );
+            }
+            return { conflicted: effects.length };
+        }
+
+        let conflicted = 0;
+        for (const { effect } of effects) {
+            if (await this.integrateEffect(serverUrl, change, effect)) {
+                conflicted += 1;
+            }
+        }
         return { conflicted };
     }
 

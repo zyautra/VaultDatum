@@ -5,6 +5,7 @@ import type {
     PendingCreate,
     PendingDelete,
     PendingModify,
+    PendingRename,
 } from "../storage/client-store";
 
 type OperationResult = components["schemas"]["OperationResult"];
@@ -87,6 +88,10 @@ export interface SyncTransport extends ContentTransport {
     submitDelete(
         serverUrl: string,
         pending: PendingDelete,
+    ): Promise<SubmitOperationResult>;
+    submitRename(
+        serverUrl: string,
+        pending: PendingRename,
     ): Promise<SubmitOperationResult>;
 }
 
@@ -203,6 +208,41 @@ export class ServerClient implements SyncTransport {
                 },
             ],
         } satisfies components["schemas"]["DeleteOperationRequest"];
+        const response = await requestUrl({
+            url: `${serverUrl}/api/v1/operations`,
+            method: "POST",
+            contentType: "application/json",
+            body: JSON.stringify(metadata),
+            throw: false,
+        });
+
+        return operationResponse(
+            response.status,
+            response.text,
+            pending.operationId,
+        );
+    }
+
+    public async submitRename(
+        serverUrl: string,
+        pending: PendingRename,
+    ): Promise<SubmitOperationResult> {
+        const metadata = {
+            operationId: pending.operationId,
+            clientId: pending.clientId,
+            type: "RENAME" as const,
+            sourcePath: pending.path,
+            destinationPath: pending.destinationPath,
+            base: [
+                {
+                    path: pending.path,
+                    state: "PRESENT" as const,
+                    revision: pending.baseRevision,
+                    contentHash: pending.baseContentHash,
+                },
+                { path: pending.destinationPath, state: "UNKNOWN" as const },
+            ],
+        } satisfies components["schemas"]["RenameOperationRequest"];
         const response = await requestUrl({
             url: `${serverUrl}/api/v1/operations`,
             method: "POST",

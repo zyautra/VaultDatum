@@ -154,6 +154,17 @@ export default class VaultDatumPlugin extends Plugin {
                 );
             }),
         );
+        this.registerEvent(
+            this.app.vault.on("rename", (file, oldPath) => {
+                if (!(file instanceof TFile)) {
+                    return;
+                }
+
+                this.captureQueue = this.captureQueue.then(() =>
+                    this.captureRenamedFile(createSync, oldPath, file.path),
+                );
+            }),
+        );
     }
 
     private async captureContentChange(
@@ -193,6 +204,28 @@ export default class VaultDatumPlugin extends Plugin {
             );
             new Notice(
                 "VaultDatum could not queue a deleted file. The local file was not restored.",
+            );
+        }
+    }
+
+    private async captureRenamedFile(
+        createSync: CreateSync,
+        sourcePath: string,
+        destinationPath: string,
+    ): Promise<void> {
+        try {
+            const pending = await createSync.captureRename(
+                sourcePath,
+                destinationPath,
+            );
+
+            if (pending !== undefined) {
+                void this.syncNow(false);
+            }
+        } catch {
+            console.warn("VaultDatum could not queue a renamed file");
+            new Notice(
+                "VaultDatum could not queue a renamed file. The local file was not changed.",
             );
         }
     }

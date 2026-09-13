@@ -34,7 +34,15 @@ export interface PendingDelete extends PendingOperationBase {
     readonly baseContentHash: string;
 }
 
-export type PendingOperation = PendingCreate | PendingModify | PendingDelete;
+export interface PendingRename extends PendingOperationBase {
+    readonly type: "RENAME";
+    readonly destinationPath: string;
+    readonly baseRevision: number;
+    readonly baseContentHash: string;
+}
+
+export type PendingOperation =
+    PendingCreate | PendingModify | PendingDelete | PendingRename;
 export type ReplicaState = "PRESENT" | "DELETED";
 
 export interface ReplicaEntry {
@@ -244,6 +252,10 @@ export class ClientStore {
     }
 
     public async saveDelete(pending: PendingDelete): Promise<void> {
+        await this.put(PENDING_STORE, pending);
+    }
+
+    public async saveRename(pending: PendingRename): Promise<void> {
         await this.put(PENDING_STORE, pending);
     }
 

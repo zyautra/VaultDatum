@@ -41,14 +41,15 @@ exposes `GET /api/v1/vault` and `POST /api/v1/operations` for multipart
 ## Current Sync Slice
 
 The Obsidian plugin has a **Server URL** setting. After the plugin has started,
-a new, modified, or deleted file outside `.obsidian/` is captured as a durable
-CREATE, MODIFY, or DELETE operation before it is eligible for upload. MODIFY
-and DELETE retain the last replicated revision and content hash as their base
-condition. The same stored snapshot and operation ID are retried after an
-interrupted request or a plugin restart. A server commit removes a local
-content artifact, but retains a lightweight committed operation marker until
-its own change-journal entry is observed. A conflict remains durable and is
-not silently overwritten.
+a new, modified, deleted, or renamed file outside `.obsidian/` is captured as
+a durable operation before it is eligible for upload. MODIFY and DELETE retain
+the last replicated revision and content hash as their base condition. RENAME
+uses a PRESENT source base and an UNKNOWN destination base, then commits both
+path effects at one server revision. The same stored snapshot and operation ID
+are retried after an interrupted request or a plugin restart. A server commit
+removes a local content artifact, but retains a lightweight committed operation
+marker until its own change-journal entry is observed. A conflict remains
+durable and is not silently overwritten.
 
 The client pulls the server change journal before and after pushing. It stores
 the server cursor, per-path replica state, conflicts, and remote-apply intents
@@ -59,19 +60,21 @@ contains several revisions for one path, it applies the final state rather than
 asking the server for content that is no longer current. Existing divergent
 local content becomes a conflict; it is never overwritten.
 
-This slice does not yet import an existing Vault, synchronize rename or move
-operations, or restore a locally recreated tombstoned path. The **Resolve
-conflict: use Server** command lets a user explicitly replace one conflicted
-local file with the latest Server version. **Resolve conflict: apply Local**
-turns a conflicted local file into a new MODIFY operation against that latest
-Server version. **Resolve conflict: keep Deleted** turns an already-deleted
-local file into a new DELETE operation against the latest Server file. **Resolve
-conflict: restore Local** creates an explicit restore operation only when the
-latest Server state is a deleted tombstone. **Resolve conflict: keep Both**
-keeps the Server file at its original path and queues this device's content as a
-new file at a user-selected path. **Resolve conflict: merge manually** shows
-the Server and local Markdown versions, then queues the user-edited result as a
-new MODIFY operation.
+This slice does not yet import an existing Vault, synchronize MOVE operations,
+or restore a locally recreated tombstoned path. RENAME changes are applied only
+when both source and destination paths are safe; a divergent local source or
+destination becomes a durable conflict and neither remote effect overwrites
+local content. The **Resolve conflict: use Server** command lets a user
+explicitly replace one conflicted local file with the latest Server version.
+**Resolve conflict: apply Local** turns a conflicted local file into a new
+MODIFY operation against that latest Server version. **Resolve conflict: keep
+Deleted** turns an already-deleted local file into a new DELETE operation
+against the latest Server file. **Resolve conflict: restore Local** creates an
+explicit restore operation only when the latest Server state is a deleted
+tombstone. **Resolve conflict: keep Both** keeps the Server file at its
+original path and queues this device's content as a new file at a user-selected
+path. **Resolve conflict: merge manually** shows the Server and local Markdown
+versions, then queues the user-edited result as a new MODIFY operation.
 
 ## Update Client Protocol Types
 
