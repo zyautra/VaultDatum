@@ -112,6 +112,58 @@ class ModifyAndDeleteOperationResourceTest {
                 .body("changes[1].revision", is(restoredRevision));
     }
 
+    @Test
+    void renamesAFileAsOneRevisionWithBothPathEffects() throws IOException {
+        String sourcePath = "renames/" + UUID.randomUUID() + ".md";
+        String destinationPath = "archive/" + UUID.randomUUID() + ".md";
+        byte[] content = "Rename this content".getBytes(StandardCharsets.UTF_8);
+        String contentHash = ContentHash.calculate(content);
+        int sourceRevision = postContent(
+                createRequest("OP-" + UUID.randomUUID(), sourcePath, content), content)
+                .then()
+                .statusCode(200)
+                .extract()
+                .path("resultRevision");
+
+        String request = renameRequest(
+                "OP-" + UUID.randomUUID(), sourcePath, destinationPath, sourceRevision, contentHash);
+        int renameRevision = given()
+                .contentType("application/json")
+                .body(request)
+                .when().post("/api/v1/operations")
+                .then()
+                .statusCode(200)
+                .body("replayed", is(false))
+                .body("resultRevision", greaterThan(sourceRevision))
+                .extract()
+                .path("resultRevision");
+
+        assertFalse(Files.exists(dataDirectories.vault().resolve(sourcePath)));
+        assertEquals("Rename this content", Files.readString(dataDirectories.vault().resolve(destinationPath)));
+
+        given()
+                .contentType("application/json")
+                .body(request)
+                .when().post("/api/v1/operations")
+                .then()
+                .statusCode(200)
+                .body("resultRevision", is(renameRevision))
+                .body("replayed", is(true));
+
+        given()
+                .queryParam("after", sourceRevision)
+                .when().get("/api/v1/changes")
+                .then()
+                .statusCode(200)
+                .body("changes[0].type", is("RENAME"))
+                .body("changes[0].sourcePath", is(sourcePath))
+                .body("changes[0].destinationPath", is(destinationPath))
+                .body("changes[0].effects[0].path", is(sourcePath))
+                .body("changes[0].effects[0].state", is("DELETED"))
+                .body("changes[0].effects[1].path", is(destinationPath))
+                .body("changes[0].effects[1].contentHash", is(contentHash));
+    }
+
     private static Response postContent(String metadata, byte[] content) {
         return given()
                 .multiPart(new MultiPartSpecBuilder(metadata)
@@ -162,5 +214,23 @@ class ModifyAndDeleteOperationResourceTest {
         return """
                 {"operationId":"%s","clientId":"mutation-client","type":"CREATE","path":"%s","base":[{"path":"%s","state":"DELETED","revision":%d}],"content":{"contentHash":"%s","size":%d}}
                 """.formatted(operationId, path, path, revision, ContentHash.calculate(content), content.length);
+    }
+
+    private static String renameRequest(
+            String operationId,
+            String sourcePath,
+            String destinationPath,
+            int sourceRevision,
+            String sourceHash) {
+        return """
+                {"operationId":"%s","clientId":"mutation-client","type":"RENAME","sourcePath":"%s","destinationPath":"%s","base":[{"path":"%s","state":"PRESENT","revision":%d,"contentHash":"%s"},{"path":"%s","state":"UNKNOWN"}]}
+                """.formatted(
+                operationId,
+                sourcePath,
+                destinationPath,
+                sourcePath,
+                sourceRevision,
+                sourceHash,
+                destinationPath);
     }
 }
