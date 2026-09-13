@@ -16,6 +16,7 @@ import {
     type ContentTransport,
     type RemoteChange,
     type RemoteChangeEffect,
+    type RemoteManifestEntry,
 } from "../transport/server-client";
 
 export interface LocalVault {
@@ -86,6 +87,27 @@ export class RemoteApply {
         }
 
         return { conflicted };
+    }
+
+    public async integrateManifestEntry(
+        serverUrl: string,
+        entry: RemoteManifestEntry,
+    ): Promise<RemoteIntegration> {
+        return this.integrateChange(serverUrl, {
+            revision: entry.revision,
+            type: entry.state === "DELETED" ? "DELETE" : "CREATE",
+            operationId: `manifest:${entry.revision}:${entry.path}`,
+            actor: { type: "SYSTEM" },
+            effects: [
+                {
+                    path: entry.path,
+                    entryType: entry.entryType,
+                    state: entry.state,
+                    contentHash: entry.contentHash,
+                    size: entry.size,
+                },
+            ],
+        });
     }
 
     private async integrateOwnRename(

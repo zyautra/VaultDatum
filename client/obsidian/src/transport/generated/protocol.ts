@@ -38,6 +38,40 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/manifests": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Create a point-in-time manifest of authoritative path state */
+        post: operations["createManifest"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/manifests/{manifestId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Read a point-in-time manifest before it expires */
+        get: operations["getManifest"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/changes": {
         parameters: {
             query?: never;
@@ -130,6 +164,8 @@ export interface components {
         ClientId: string;
         /** @description Idempotency key for one logical client mutation. */
         OperationId: string;
+        /** @description Opaque identifier of a short-lived immutable manifest snapshot. */
+        ManifestId: string;
         /**
          * Format: int64
          * @description Contiguous committed revision cursor; zero means no changes processed.
@@ -162,6 +198,51 @@ export interface components {
             protocolVersion: 1;
             /** @constant */
             hashAlgorithm: "SHA-256";
+        };
+        ManifestCreated: {
+            manifestId: components["schemas"]["ManifestId"];
+            vaultId: components["schemas"]["VaultId"];
+            snapshotRevision: components["schemas"]["CursorRevision"];
+            /** Format: date-time */
+            expiresAt: string;
+        };
+        Manifest: {
+            manifestId: components["schemas"]["ManifestId"];
+            vaultId: components["schemas"]["VaultId"];
+            snapshotRevision: components["schemas"]["CursorRevision"];
+            /** Format: date-time */
+            expiresAt: string;
+            entries: components["schemas"]["ManifestEntry"][];
+        };
+        ManifestEntry:
+            | components["schemas"]["PresentFileManifestEntry"]
+            | components["schemas"]["PresentDirectoryManifestEntry"]
+            | components["schemas"]["DeletedManifestEntry"];
+        PresentFileManifestEntry: {
+            path: components["schemas"]["SyncPath"];
+            /** @constant */
+            entryType: "FILE";
+            /** @constant */
+            state: "PRESENT";
+            revision: components["schemas"]["CommittedRevision"];
+            contentHash: components["schemas"]["ContentHash"];
+            /** Format: int64 */
+            size: number;
+        };
+        PresentDirectoryManifestEntry: {
+            path: components["schemas"]["SyncPath"];
+            /** @constant */
+            entryType: "DIRECTORY";
+            /** @constant */
+            state: "PRESENT";
+            revision: components["schemas"]["CommittedRevision"];
+        };
+        DeletedManifestEntry: {
+            path: components["schemas"]["SyncPath"];
+            entryType: components["schemas"]["EntryType"];
+            /** @constant */
+            state: "DELETED";
+            revision: components["schemas"]["CommittedRevision"];
         };
         PathState:
             | components["schemas"]["UnknownPathState"]
@@ -375,6 +456,7 @@ export interface components {
                 | "STATE_CHANGED"
                 | "HISTORY_NOT_AVAILABLE"
                 | "MANIFEST_EXPIRED"
+                | "MANIFEST_NOT_FOUND"
                 | "RECOVERY_REQUIRED"
                 | "SERVER_NOT_READY"
                 | "UNAUTHORIZED"
@@ -428,6 +510,7 @@ export interface components {
         AfterRevision: components["schemas"]["CursorRevision"];
         /** @description Maximum number of changes to return. */
         PageLimit: number;
+        ManifestId: components["schemas"]["ManifestId"];
         /** @description Vault-root-relative logical path using `/` separators. */
         SyncPathParameter: components["schemas"]["SyncPath"];
         /** @description Latest committed revision of the requested path. */
@@ -481,6 +564,72 @@ export interface operations {
             };
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
+            503: components["responses"]["ServerUnavailable"];
+        };
+    };
+    createManifest: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Manifest snapshot created */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ManifestCreated"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            503: components["responses"]["ServerUnavailable"];
+        };
+    };
+    getManifest: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                manifestId: components["parameters"]["ManifestId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Authoritative path state at the manifest snapshot revision */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Manifest"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            /** @description Manifest does not exist */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProtocolError"];
+                };
+            };
+            /** @description Manifest lifetime elapsed before it could be read */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProtocolError"];
+                };
+            };
             503: components["responses"]["ServerUnavailable"];
         };
     };

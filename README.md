@@ -59,9 +59,10 @@ durable and is not silently overwritten.
 
 The client pulls the server change journal before and after pushing. It stores
 the server cursor, per-path replica state, conflicts, and remote-apply intents
-in IndexedDB. A second empty client therefore downloads a server-created or
-modified file through `GET /api/v1/changes` and conditional `GET /api/v1/content`,
-and removes a matching replica when it observes a server delete. When a page
+in IndexedDB. A client with no cursor and no stored operations first creates a
+short-lived server manifest, materializes its present files through conditional
+`GET /api/v1/content`, records deleted tombstones, and advances to the manifest
+snapshot cursor. It then pulls later journal changes normally. When a page
 contains several revisions for one path, it applies the final state rather than
 asking the server for content that is no longer current. Existing divergent
 local content becomes a conflict; it is never overwritten.

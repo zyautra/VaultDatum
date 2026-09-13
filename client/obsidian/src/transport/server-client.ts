@@ -48,6 +48,30 @@ export interface RemoteChangeEffect {
     readonly size?: number;
 }
 
+export interface RemoteManifestCreated {
+    readonly manifestId: string;
+    readonly vaultId: string;
+    readonly snapshotRevision: number;
+    readonly expiresAt: string;
+}
+
+export interface RemoteManifest {
+    readonly manifestId: string;
+    readonly vaultId: string;
+    readonly snapshotRevision: number;
+    readonly expiresAt: string;
+    readonly entries: readonly RemoteManifestEntry[];
+}
+
+export interface RemoteManifestEntry {
+    readonly path: string;
+    readonly entryType: "FILE" | "DIRECTORY";
+    readonly state: "PRESENT" | "DELETED";
+    readonly revision: number;
+    readonly contentHash?: string;
+    readonly size?: number;
+}
+
 export type SubmitOperationResult =
     | { readonly kind: "COMMITTED"; readonly result: OperationResult }
     | { readonly kind: "REJECTED"; readonly code: string }
@@ -57,6 +81,7 @@ export type ReadResult<T> =
     | { readonly kind: "OK"; readonly value: T }
     | { readonly kind: "UNAVAILABLE" }
     | { readonly kind: "STATE_CHANGED" }
+    | { readonly kind: "MANIFEST_EXPIRED" }
     | { readonly kind: "HISTORY_NOT_AVAILABLE" };
 
 export interface ContentTransport {
@@ -70,6 +95,13 @@ export interface ContentTransport {
 
 export interface SyncTransport extends ContentTransport {
     readVault(serverUrl: string): Promise<ReadResult<RemoteVaultInfo>>;
+    createManifest(
+        serverUrl: string,
+    ): Promise<ReadResult<RemoteManifestCreated>>;
+    readManifest(
+        serverUrl: string,
+        manifestId: string,
+    ): Promise<ReadResult<RemoteManifest>>;
     listChanges(
         serverUrl: string,
         after: number,
@@ -112,6 +144,46 @@ export class ServerClient implements SyncTransport {
             }
 
             throw new Error("Server returned invalid Vault metadata");
+        }
+
+        return readFailure(response.status, response.text);
+    }
+
+    public async createManifest(
+        serverUrl: string,
+    ): Promise<ReadResult<RemoteManifestCreated>> {
+        const response = await requestUrl({
+            url: `${serverUrl}/api/v1/manifests`,
+            method: "POST",
+            throw: false,
+        });
+
+        if (response.status === 201) {
+            const created = manifestCreated(response.text);
+            if (created !== undefined) {
+                return { kind: "OK", value: created };
+            }
+            throw new Error("Server returned an invalid manifest response");
+        }
+
+        return readFailure(response.status, response.text);
+    }
+
+    public async readManifest(
+        serverUrl: string,
+        manifestId: string,
+    ): Promise<ReadResult<RemoteManifest>> {
+        const response = await requestUrl({
+            url: `${serverUrl}/api/v1/manifests/${encodeURIComponent(manifestId)}`,
+            throw: false,
+        });
+
+        if (response.status === 200) {
+            const manifest = manifestSnapshot(response.text);
+            if (manifest !== undefined && manifest.manifestId === manifestId) {
+                return { kind: "OK", value: manifest };
+            }
+            throw new Error("Server returned an invalid manifest snapshot");
         }
 
         return readFailure(response.status, response.text);
@@ -385,6 +457,9 @@ function readFailure(status: number, content: string): ReadResult<never> {
     if (code === "STATE_CHANGED") {
         return { kind: "STATE_CHANGED" };
     }
+    if (code === "MANIFEST_EXPIRED") {
+        return { kind: "MANIFEST_EXPIRED" };
+    }
     if (code === "HISTORY_NOT_AVAILABLE") {
         return { kind: "HISTORY_NOT_AVAILABLE" };
     }
@@ -443,6 +518,98 @@ function changePage(content: string): RemoteChangePage | undefined {
         hasMore: parsed.hasMore,
         changes: changes as RemoteChange[],
     };
+}
+
+function manifestCreated(content: string): RemoteManifestCreated | undefined {
+    const parsed = parseJson(content);
+    if (
+        !isRecord(parsed) ||
+        typeof parsed.manifestId !== "string" ||
+        parsed.manifestId.length === 0 ||
+        typeof parsed.vaultId !== "string" ||
+        !nonNegativeInteger(parsed.snapshotRevision) ||
+        !dateTime(parsed.expiresAt)
+    ) {
+        return undefined;
+    }
+
+    return {
+        manifestId: parsed.manifestId,
+        vaultId: parsed.vaultId,
+        snapshotRevision: parsed.snapshotRevision,
+        expiresAt: parsed.expiresAt,
+    };
+}
+
+function manifestSnapshot(content: string): RemoteManifest | undefined {
+    const parsed = parseJson(content);
+    if (
+        !isRecord(parsed) ||
+        typeof parsed.manifestId !== "string" ||
+        parsed.manifestId.length === 0 ||
+        typeof parsed.vaultId !== "string" ||
+        !nonNegativeInteger(parsed.snapshotRevision) ||
+        !dateTime(parsed.expiresAt) ||
+        !Array.isArray(parsed.entries)
+    ) {
+        return undefined;
+    }
+
+    const entries = parsed.entries.map(manifestEntry);
+    if (entries.some((entry) => entry === undefined)) {
+        return undefined;
+    }
+    return {
+        manifestId: parsed.manifestId,
+        vaultId: parsed.vaultId,
+        snapshotRevision: parsed.snapshotRevision,
+        expiresAt: parsed.expiresAt,
+        entries: entries as RemoteManifestEntry[],
+    };
+}
+
+function manifestEntry(value: unknown): RemoteManifestEntry | undefined {
+    if (
+        !isRecord(value) ||
+        typeof value.path !== "string" ||
+        !entryType(value.entryType) ||
+        !replicaState(value.state) ||
+        !positiveInteger(value.revision)
+    ) {
+        return undefined;
+    }
+    if (value.state === "DELETED") {
+        return {
+            path: value.path,
+            entryType: value.entryType,
+            state: "DELETED",
+            revision: value.revision,
+        };
+    }
+    if (
+        value.entryType === "FILE" &&
+        isContentHash(value.contentHash) &&
+        nonNegativeInteger(value.size)
+    ) {
+        return {
+            path: value.path,
+            entryType: "FILE",
+            state: "PRESENT",
+            revision: value.revision,
+            contentHash: value.contentHash,
+            size: value.size,
+        };
+    }
+    if (value.entryType === "DIRECTORY") {
+        return {
+            path: value.path,
+            entryType: "DIRECTORY",
+            state: "PRESENT",
+            revision: value.revision,
+        };
+    }
+
+    return undefined;
 }
 
 function change(value: unknown): RemoteChange | undefined {
@@ -594,6 +761,14 @@ function nonNegativeInteger(value: unknown): value is number {
 
 function positiveInteger(value: unknown): value is number {
     return nonNegativeInteger(value) && value > 0;
+}
+
+function dateTime(value: unknown): value is string {
+    return (
+        typeof value === "string" &&
+        value.length > 0 &&
+        !Number.isNaN(Date.parse(value))
+    );
 }
 
 function isContentHash(value: unknown): value is string {

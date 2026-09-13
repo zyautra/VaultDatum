@@ -44,6 +44,58 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "503":
           $ref: "#/components/responses/ServerUnavailable"
+  /api/v1/manifests:
+    post:
+      tags:
+        - Synchronization
+      operationId: createManifest
+      summary: Create a point-in-time manifest of authoritative path state
+      responses:
+        "201":
+          description: Manifest snapshot created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ManifestCreated"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "503":
+          $ref: "#/components/responses/ServerUnavailable"
+  /api/v1/manifests/{manifestId}:
+    get:
+      tags:
+        - Synchronization
+      operationId: getManifest
+      summary: Read a point-in-time manifest before it expires
+      parameters:
+        - $ref: "#/components/parameters/ManifestId"
+      responses:
+        "200":
+          description: Authoritative path state at the manifest snapshot revision
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Manifest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: Manifest does not exist
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProtocolError"
+        "409":
+          description: Manifest lifetime elapsed before it could be read
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProtocolError"
+        "503":
+          $ref: "#/components/responses/ServerUnavailable"
   /api/v1/changes:
     get:
       tags:
@@ -216,6 +268,12 @@ components:
         format: int32
         minimum: 1
         default: 500
+    ManifestId:
+      name: manifestId
+      in: path
+      required: true
+      schema:
+        $ref: "#/components/schemas/ManifestId"
     SyncPathParameter:
       name: path
       in: query
@@ -284,6 +342,10 @@ components:
       type: string
       minLength: 1
       description: Idempotency key for one logical client mutation.
+    ManifestId:
+      type: string
+      minLength: 1
+      description: Opaque identifier of a short-lived immutable manifest snapshot.
     CursorRevision:
       type: integer
       format: int64
@@ -340,6 +402,116 @@ components:
         hashAlgorithm:
           type: string
           const: SHA-256
+    ManifestCreated:
+      type: object
+      additionalProperties: false
+      required:
+        - manifestId
+        - vaultId
+        - snapshotRevision
+        - expiresAt
+      properties:
+        manifestId:
+          $ref: "#/components/schemas/ManifestId"
+        vaultId:
+          $ref: "#/components/schemas/VaultId"
+        snapshotRevision:
+          $ref: "#/components/schemas/CursorRevision"
+        expiresAt:
+          type: string
+          format: date-time
+    Manifest:
+      type: object
+      additionalProperties: false
+      required:
+        - manifestId
+        - vaultId
+        - snapshotRevision
+        - expiresAt
+        - entries
+      properties:
+        manifestId:
+          $ref: "#/components/schemas/ManifestId"
+        vaultId:
+          $ref: "#/components/schemas/VaultId"
+        snapshotRevision:
+          $ref: "#/components/schemas/CursorRevision"
+        expiresAt:
+          type: string
+          format: date-time
+        entries:
+          type: array
+          items:
+            $ref: "#/components/schemas/ManifestEntry"
+    ManifestEntry:
+      oneOf:
+        - $ref: "#/components/schemas/PresentFileManifestEntry"
+        - $ref: "#/components/schemas/PresentDirectoryManifestEntry"
+        - $ref: "#/components/schemas/DeletedManifestEntry"
+    PresentFileManifestEntry:
+      type: object
+      additionalProperties: false
+      required:
+        - path
+        - entryType
+        - state
+        - revision
+        - contentHash
+        - size
+      properties:
+        path:
+          $ref: "#/components/schemas/SyncPath"
+        entryType:
+          type: string
+          const: FILE
+        state:
+          type: string
+          const: PRESENT
+        revision:
+          $ref: "#/components/schemas/CommittedRevision"
+        contentHash:
+          $ref: "#/components/schemas/ContentHash"
+        size:
+          type: integer
+          format: int64
+          minimum: 0
+    PresentDirectoryManifestEntry:
+      type: object
+      additionalProperties: false
+      required:
+        - path
+        - entryType
+        - state
+        - revision
+      properties:
+        path:
+          $ref: "#/components/schemas/SyncPath"
+        entryType:
+          type: string
+          const: DIRECTORY
+        state:
+          type: string
+          const: PRESENT
+        revision:
+          $ref: "#/components/schemas/CommittedRevision"
+    DeletedManifestEntry:
+      type: object
+      additionalProperties: false
+      required:
+        - path
+        - entryType
+        - state
+        - revision
+      properties:
+        path:
+          $ref: "#/components/schemas/SyncPath"
+        entryType:
+          $ref: "#/components/schemas/EntryType"
+        state:
+          type: string
+          const: DELETED
+        revision:
+          $ref: "#/components/schemas/CommittedRevision"
     PathState:
       oneOf:
         - $ref: "#/components/schemas/UnknownPathState"
@@ -856,6 +1028,7 @@ components:
             - STATE_CHANGED
             - HISTORY_NOT_AVAILABLE
             - MANIFEST_EXPIRED
+            - MANIFEST_NOT_FOUND
             - RECOVERY_REQUIRED
             - SERVER_NOT_READY
             - UNAUTHORIZED

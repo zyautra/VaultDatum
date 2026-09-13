@@ -273,6 +273,10 @@ export class ClientStore {
             );
     }
 
+    public async hasStoredOperations(): Promise<boolean> {
+        return (await this.pendingRecords()).length > 0;
+    }
+
     public async markInFlight(operationId: string): Promise<void> {
         await this.updatePending(operationId, (pending) => ({
             ...pending,

@@ -13,6 +13,8 @@ import {
 import {
     type RemoteChange,
     type RemoteChangeEffect,
+    type RemoteManifest,
+    type RemoteManifestCreated,
     type SubmitOperationResult,
     type SyncTransport,
 } from "../transport/server-client";
@@ -362,9 +364,27 @@ export class CreateSync {
             return { conflicted: 0, unavailable: true };
         }
 
-        const state = await this.store.confirmVault(vault.value.vaultId);
+        let state = await this.store.confirmVault(vault.value.vaultId);
+        let conflicted = 0;
+
+        if (
+            state.serverCursor === 0 &&
+            vault.value.currentRevision > 0 &&
+            !(await this.store.hasStoredOperations())
+        ) {
+            const initial = await this.initializeFromManifest(
+                serverUrl,
+                vault.value.vaultId,
+            );
+            if (initial.unavailable) {
+                return initial;
+            }
+            conflicted += initial.conflicted;
+            state = await this.store.syncState();
+        }
+
         if (state.serverCursor >= vault.value.currentRevision) {
-            return { conflicted: 0, unavailable: false };
+            return { conflicted, unavailable: false };
         }
 
         let cursor = state.serverCursor;
@@ -414,7 +434,6 @@ export class CreateSync {
             }
         }
 
-        let conflicted = 0;
         const integratedOwnEffects = new Set<string>();
         for (const change of changes) {
             if (!(await this.isTrackedOwnChange(change))) {
@@ -443,6 +462,44 @@ export class CreateSync {
             conflicted += integrated.conflicted;
         }
         await this.store.advanceCursor(vault.value.vaultId, cursor);
+        return { conflicted, unavailable: false };
+    }
+
+    private async initializeFromManifest(
+        serverUrl: string,
+        vaultId: string,
+    ): Promise<PullSummary> {
+        const created = await this.serverClient.createManifest(serverUrl);
+        if (created.kind !== "OK") {
+            return { conflicted: 0, unavailable: true };
+        }
+        if (created.value.vaultId !== vaultId) {
+            throw new Error(
+                "Server changed Vault identity during manifest creation",
+            );
+        }
+
+        const manifest = await this.serverClient.readManifest(
+            serverUrl,
+            created.value.manifestId,
+        );
+        if (manifest.kind !== "OK") {
+            return { conflicted: 0, unavailable: true };
+        }
+        validateManifest(created.value, manifest.value, vaultId);
+
+        let conflicted = 0;
+        for (const entry of manifest.value.entries) {
+            const integrated = await this.remoteApply.integrateManifestEntry(
+                serverUrl,
+                entry,
+            );
+            conflicted += integrated.conflicted;
+        }
+        await this.store.advanceCursor(
+            vaultId,
+            manifest.value.snapshotRevision,
+        );
         return { conflicted, unavailable: false };
     }
 
@@ -557,6 +614,22 @@ function singleEffectChange(
 
 function effectKey(change: RemoteChange, effect: RemoteChangeEffect): string {
     return `${change.revision}:${effect.path}`;
+}
+
+function validateManifest(
+    created: RemoteManifestCreated,
+    manifest: RemoteManifest,
+    vaultId: string,
+): void {
+    if (
+        manifest.manifestId !== created.manifestId ||
+        manifest.vaultId !== vaultId ||
+        created.vaultId !== vaultId ||
+        manifest.snapshotRevision !== created.snapshotRevision ||
+        manifest.expiresAt !== created.expiresAt
+    ) {
+        throw new Error("Server returned inconsistent manifest metadata");
+    }
 }
 
 function unavailable(committed: number, conflicted: number): SyncSummary {

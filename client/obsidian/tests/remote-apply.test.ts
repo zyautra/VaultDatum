@@ -19,6 +19,9 @@ import type {
     ReadResult,
     RemoteChange,
     RemoteChangePage,
+    RemoteManifest,
+    RemoteManifestCreated,
+    RemoteManifestEntry,
     RemoteVaultInfo,
     SubmitOperationResult,
     SyncTransport,
@@ -49,6 +52,85 @@ async function appliesARemoteCreateToAnEmptyVault(): Promise<void> {
         size: content.byteLength,
     });
     assert.deepEqual(await store.applyIntents(), []);
+    store.close();
+}
+
+async function initializesFromAManifestAndCatchesUpLaterChanges(): Promise<void> {
+    const path = "notes/manifest-initial.md";
+    const snapshotContent = bytes("Content in the manifest snapshot");
+    const laterContent = bytes("Content changed after the manifest snapshot");
+    const snapshotHash = await contentHash(snapshotContent);
+    const laterHash = await contentHash(laterContent);
+    const transport = new ManifestTransport(
+        path,
+        snapshotContent,
+        {
+            revision: 2,
+            type: "MODIFY",
+            operationId: `OP-${crypto.randomUUID()}`,
+            actor: { type: "CLIENT", clientId: "C-remote-client" },
+            effects: [
+                {
+                    path,
+                    entryType: "FILE",
+                    state: "PRESENT",
+                    contentHash: laterHash,
+                    size: laterContent.byteLength,
+                },
+            ],
+        },
+        laterContent,
+    );
+    const store = await ClientStore.open(
+        `test-manifest-initial-${crypto.randomUUID()}`,
+    );
+    const vault = new MemoryVault();
+    const sync = new CreateSync(
+        store,
+        transport,
+        vault,
+        () => "https://vaultdatum.test",
+    );
+
+    const summary = await sync.sync();
+
+    assert.equal(summary.offline, false);
+    assert.equal(summary.conflicted, 0);
+    assert.equal(transport.manifestCreates, 1);
+    assert.equal(transport.manifestReads, 1);
+    assert.equal(await vault.hash(path), laterHash);
+    assert.equal((await store.replica(path))?.contentHash, laterHash);
+    assert.equal((await store.syncState()).serverCursor, 2);
+    assert.notEqual(snapshotHash, laterHash);
+    store.close();
+}
+
+async function preservesExistingLocalContentDuringInitialManifestSync(): Promise<void> {
+    const path = "notes/manifest-conflict.md";
+    const snapshotContent = bytes("Authoritative manifest content");
+    const localContent = bytes("Existing local content");
+    const snapshotHash = await contentHash(snapshotContent);
+    const transport = new ManifestTransport(path, snapshotContent);
+    const store = await ClientStore.open(
+        `test-manifest-conflict-${crypto.randomUUID()}`,
+    );
+    const vault = new MemoryVault();
+    await vault.writeFile(path, localContent);
+    const sync = new CreateSync(
+        store,
+        transport,
+        vault,
+        () => "https://vaultdatum.test",
+    );
+
+    const summary = await sync.sync();
+
+    assert.equal(summary.offline, false);
+    assert.equal(summary.conflicted, 1);
+    assert.equal(await vault.hash(path), await contentHash(localContent));
+    assert.equal(await store.hasConflict(path), true);
+    assert.equal((await store.replica(path))?.contentHash, snapshotHash);
+    assert.equal((await store.syncState()).serverCursor, 1);
     store.close();
 }
 
@@ -1187,6 +1269,22 @@ class NoopTransport implements SyncTransport {
         return { kind: "UNAVAILABLE" };
     }
 
+    public async createManifest(
+        serverUrl: string,
+    ): Promise<ReadResult<RemoteManifestCreated>> {
+        void serverUrl;
+        return { kind: "UNAVAILABLE" };
+    }
+
+    public async readManifest(
+        serverUrl: string,
+        manifestId: string,
+    ): Promise<ReadResult<RemoteManifest>> {
+        void serverUrl;
+        void manifestId;
+        return { kind: "UNAVAILABLE" };
+    }
+
     public async listChanges(
         serverUrl: string,
         after: number,
@@ -1276,6 +1374,41 @@ class HistoryTransport extends DownloadTransport implements SyncTransport {
         };
     }
 
+    public async createManifest(
+        serverUrl: string,
+    ): Promise<ReadResult<RemoteManifestCreated>> {
+        void serverUrl;
+        return {
+            kind: "OK",
+            value: {
+                manifestId: "M-history",
+                vaultId: "V-test-vault",
+                snapshotRevision: 2,
+                expiresAt: "2030-01-01T00:00:00Z",
+            },
+        };
+    }
+
+    public async readManifest(
+        serverUrl: string,
+        manifestId: string,
+    ): Promise<ReadResult<RemoteManifest>> {
+        void serverUrl;
+        if (manifestId !== "M-history") {
+            return { kind: "MANIFEST_EXPIRED" };
+        }
+        return {
+            kind: "OK",
+            value: {
+                manifestId,
+                vaultId: "V-test-vault",
+                snapshotRevision: 2,
+                expiresAt: "2030-01-01T00:00:00Z",
+                entries: this.manifestEntries(),
+            },
+        };
+    }
+
     public async listChanges(
         serverUrl: string,
         after: number,
@@ -1336,6 +1469,182 @@ class HistoryTransport extends DownloadTransport implements SyncTransport {
         void serverUrl;
         void pending;
         return { kind: "UNAVAILABLE" };
+    }
+
+    private manifestEntries(): readonly RemoteManifestEntry[] {
+        const entries = new Map<string, RemoteManifestEntry>();
+        for (const change of this.changes) {
+            for (const effect of change.effects) {
+                if (effect.state === "DELETED") {
+                    entries.set(effect.path, {
+                        path: effect.path,
+                        entryType: effect.entryType,
+                        state: "DELETED",
+                        revision: change.revision,
+                    });
+                    continue;
+                }
+                if (
+                    effect.entryType === "FILE" &&
+                    effect.contentHash !== undefined &&
+                    effect.size !== undefined
+                ) {
+                    entries.set(effect.path, {
+                        path: effect.path,
+                        entryType: "FILE",
+                        state: "PRESENT",
+                        revision: change.revision,
+                        contentHash: effect.contentHash,
+                        size: effect.size,
+                    });
+                    continue;
+                }
+                entries.set(effect.path, {
+                    path: effect.path,
+                    entryType: "DIRECTORY",
+                    state: "PRESENT",
+                    revision: change.revision,
+                });
+            }
+        }
+        return [...entries.values()];
+    }
+}
+
+class ManifestTransport extends NoopTransport {
+    public manifestCreates = 0;
+
+    public manifestReads = 0;
+
+    private manifestCreated = false;
+
+    public constructor(
+        private readonly path: string,
+        private readonly snapshotContent: ArrayBuffer,
+        private readonly laterChange?: RemoteChange,
+        private readonly laterContent?: ArrayBuffer,
+    ) {
+        super();
+    }
+
+    public override async readVault(
+        serverUrl: string,
+    ): Promise<ReadResult<RemoteVaultInfo>> {
+        void serverUrl;
+        return {
+            kind: "OK",
+            value: {
+                vaultId: "V-manifest-test",
+                currentRevision:
+                    this.manifestCreated && this.laterChange !== undefined
+                        ? this.laterChange.revision
+                        : 1,
+                oldestRetainedRevision: 0,
+                protocolVersion: 1,
+                hashAlgorithm: "SHA-256",
+            },
+        };
+    }
+
+    public override async createManifest(
+        serverUrl: string,
+    ): Promise<ReadResult<RemoteManifestCreated>> {
+        void serverUrl;
+        this.manifestCreated = true;
+        this.manifestCreates += 1;
+        return {
+            kind: "OK",
+            value: {
+                manifestId: "M-manifest-test",
+                vaultId: "V-manifest-test",
+                snapshotRevision: 1,
+                expiresAt: "2030-01-01T00:00:00Z",
+            },
+        };
+    }
+
+    public override async readManifest(
+        serverUrl: string,
+        manifestId: string,
+    ): Promise<ReadResult<RemoteManifest>> {
+        void serverUrl;
+        this.manifestReads += 1;
+        if (manifestId !== "M-manifest-test") {
+            return { kind: "MANIFEST_EXPIRED" };
+        }
+        const snapshotHash = await contentHash(this.snapshotContent);
+        return {
+            kind: "OK",
+            value: {
+                manifestId,
+                vaultId: "V-manifest-test",
+                snapshotRevision: 1,
+                expiresAt: "2030-01-01T00:00:00Z",
+                entries: [
+                    {
+                        path: this.path,
+                        entryType: "FILE",
+                        state: "PRESENT",
+                        revision: 1,
+                        contentHash: snapshotHash,
+                        size: this.snapshotContent.byteLength,
+                    },
+                ],
+            },
+        };
+    }
+
+    public override async listChanges(
+        serverUrl: string,
+        after: number,
+        limit: number,
+    ): Promise<ReadResult<RemoteChangePage>> {
+        void serverUrl;
+        void limit;
+        const currentRevision =
+            this.manifestCreated && this.laterChange !== undefined
+                ? this.laterChange.revision
+                : 1;
+        return {
+            kind: "OK",
+            value: {
+                vaultId: "V-manifest-test",
+                fromExclusive: after,
+                toInclusive: currentRevision,
+                currentRevision,
+                hasMore: false,
+                changes:
+                    this.laterChange !== undefined &&
+                    after < this.laterChange.revision
+                        ? [this.laterChange]
+                        : [],
+            },
+        };
+    }
+
+    public override async downloadContent(
+        serverUrl: string,
+        path: string,
+        revision: number,
+        contentHashValue: string,
+    ): Promise<ReadResult<ArrayBuffer>> {
+        void serverUrl;
+        if (path !== this.path) {
+            return { kind: "STATE_CHANGED" };
+        }
+        if (
+            revision === 1 &&
+            contentHashValue === (await contentHash(this.snapshotContent))
+        ) {
+            return { kind: "OK", value: this.snapshotContent.slice(0) };
+        }
+        if (
+            this.laterChange?.effects[0]?.contentHash === contentHashValue &&
+            this.laterContent !== undefined
+        ) {
+            return { kind: "OK", value: this.laterContent.slice(0) };
+        }
+        return { kind: "STATE_CHANGED" };
     }
 }
 
@@ -1548,6 +1857,8 @@ async function pendingModify(
 }
 
 await appliesARemoteCreateToAnEmptyVault();
+await initializesFromAManifestAndCatchesUpLaterChanges();
+await preservesExistingLocalContentDuringInitialManifestSync();
 await discardsAnApplyInterruptedBeforeContentIsStaged();
 await resumesAStagedApplyAfterRestartBeforeLocalWrite();
 await finalizesAnApplyAfterLocalWriteBeforeMetadataFinalization();
