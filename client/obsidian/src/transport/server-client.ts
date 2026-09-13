@@ -1,7 +1,11 @@
 import { requestUrl } from "obsidian";
 
 import type { components } from "./generated/protocol";
-import type { PendingCreate } from "../storage/client-store";
+import type {
+    PendingCreate,
+    PendingDelete,
+    PendingModify,
+} from "../storage/client-store";
 
 type OperationResult = components["schemas"]["OperationResult"];
 
@@ -43,7 +47,7 @@ export interface RemoteChangeEffect {
     readonly size?: number;
 }
 
-export type SubmitCreateResult =
+export type SubmitOperationResult =
     | { readonly kind: "COMMITTED"; readonly result: OperationResult }
     | { readonly kind: "REJECTED"; readonly code: string }
     | { readonly kind: "UNAVAILABLE" };
@@ -74,7 +78,16 @@ export interface SyncTransport extends ContentTransport {
         serverUrl: string,
         pending: PendingCreate,
         content: Blob,
-    ): Promise<SubmitCreateResult>;
+    ): Promise<SubmitOperationResult>;
+    submitModify(
+        serverUrl: string,
+        pending: PendingModify,
+        content: Blob,
+    ): Promise<SubmitOperationResult>;
+    submitDelete(
+        serverUrl: string,
+        pending: PendingDelete,
+    ): Promise<SubmitOperationResult>;
 }
 
 export class ServerClient implements SyncTransport {
@@ -160,18 +173,57 @@ export class ServerClient implements SyncTransport {
         serverUrl: string,
         pending: PendingCreate,
         content: Blob,
-    ): Promise<SubmitCreateResult> {
+    ): Promise<SubmitOperationResult> {
+        return this.submitContentOperation(serverUrl, pending, content);
+    }
+
+    public async submitModify(
+        serverUrl: string,
+        pending: PendingModify,
+        content: Blob,
+    ): Promise<SubmitOperationResult> {
+        return this.submitContentOperation(serverUrl, pending, content);
+    }
+
+    public async submitDelete(
+        serverUrl: string,
+        pending: PendingDelete,
+    ): Promise<SubmitOperationResult> {
         const metadata = {
             operationId: pending.operationId,
             clientId: pending.clientId,
-            type: "CREATE" as const,
+            type: "DELETE" as const,
             path: pending.path,
-            base: [{ path: pending.path, state: "UNKNOWN" as const }],
-            content: {
-                contentHash: pending.contentHash,
-                size: pending.size,
-            },
-        } satisfies components["schemas"]["CreateOperationRequest"];
+            base: [
+                {
+                    path: pending.path,
+                    state: "PRESENT" as const,
+                    revision: pending.baseRevision,
+                    contentHash: pending.baseContentHash,
+                },
+            ],
+        } satisfies components["schemas"]["DeleteOperationRequest"];
+        const response = await requestUrl({
+            url: `${serverUrl}/api/v1/operations`,
+            method: "POST",
+            contentType: "application/json",
+            body: JSON.stringify(metadata),
+            throw: false,
+        });
+
+        return operationResponse(
+            response.status,
+            response.text,
+            pending.operationId,
+        );
+    }
+
+    private async submitContentOperation(
+        serverUrl: string,
+        pending: PendingCreate | PendingModify,
+        content: Blob,
+    ): Promise<SubmitOperationResult> {
+        const metadata = contentMetadata(pending);
         const boundary = `VaultDatum-${crypto.randomUUID()}`;
         const response = await requestUrl({
             url: `${serverUrl}/api/v1/operations`,
@@ -185,27 +237,73 @@ export class ServerClient implements SyncTransport {
             throw: false,
         });
 
-        if (response.status === 200) {
-            const result = operationResult(response.text);
-
-            if (
-                result !== undefined &&
-                result.operationId === pending.operationId
-            ) {
-                return { kind: "COMMITTED", result };
-            }
-
-            throw new Error("Server returned an invalid operation result");
-        }
-        if (response.status === 503) {
-            return { kind: "UNAVAILABLE" };
-        }
-
-        return {
-            kind: "REJECTED",
-            code: errorCode(response.text) ?? `HTTP_${response.status}`,
-        };
+        return operationResponse(
+            response.status,
+            response.text,
+            pending.operationId,
+        );
     }
+}
+
+function contentMetadata(
+    pending: PendingCreate | PendingModify,
+): components["schemas"]["ContentOperationRequest"] {
+    if (pending.type === "CREATE") {
+        return {
+            operationId: pending.operationId,
+            clientId: pending.clientId,
+            type: "CREATE",
+            path: pending.path,
+            base: [{ path: pending.path, state: "UNKNOWN" }],
+            content: {
+                contentHash: pending.contentHash,
+                size: pending.size,
+            },
+        } satisfies components["schemas"]["CreateOperationRequest"];
+    }
+
+    return {
+        operationId: pending.operationId,
+        clientId: pending.clientId,
+        type: "MODIFY",
+        path: pending.path,
+        base: [
+            {
+                path: pending.path,
+                state: "PRESENT",
+                revision: pending.baseRevision,
+                contentHash: pending.baseContentHash,
+            },
+        ],
+        content: {
+            contentHash: pending.contentHash,
+            size: pending.size,
+        },
+    } satisfies components["schemas"]["ModifyOperationRequest"];
+}
+
+function operationResponse(
+    status: number,
+    content: string,
+    operationId: string,
+): SubmitOperationResult {
+    if (status === 200) {
+        const result = operationResult(content);
+
+        if (result !== undefined && result.operationId === operationId) {
+            return { kind: "COMMITTED", result };
+        }
+
+        throw new Error("Server returned an invalid operation result");
+    }
+    if (status === 503) {
+        return { kind: "UNAVAILABLE" };
+    }
+
+    return {
+        kind: "REJECTED",
+        code: errorCode(content) ?? `HTTP_${status}`,
+    };
 }
 
 async function multipartBody(

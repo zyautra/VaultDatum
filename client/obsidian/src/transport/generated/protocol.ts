@@ -269,7 +269,7 @@ export interface components {
             /** @constant */
             state: "PRESENT";
             revision: components["schemas"]["CommittedRevision"];
-            contentHash?: components["schemas"]["ContentHash"];
+            contentHash: components["schemas"]["ContentHash"];
         };
         DeletedBaseCondition: {
             path: components["schemas"]["SyncPath"];

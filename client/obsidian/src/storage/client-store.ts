@@ -1,18 +1,37 @@
 export type PendingStatus = "READY" | "IN_FLIGHT" | "CONFLICT" | "COMMITTED";
 
-export interface PendingCreate {
+interface PendingOperationBase {
     readonly operationId: string;
     readonly clientId: string;
-    readonly type: "CREATE";
     readonly path: string;
-    readonly contentHash: string;
-    readonly size: number;
-    readonly artifactId: string;
     readonly createdAt: string;
     readonly status: PendingStatus;
     readonly failureCode?: string;
 }
 
+interface PendingContentOperation extends PendingOperationBase {
+    readonly contentHash: string;
+    readonly size: number;
+    readonly artifactId: string;
+}
+
+export interface PendingCreate extends PendingContentOperation {
+    readonly type: "CREATE";
+}
+
+export interface PendingModify extends PendingContentOperation {
+    readonly type: "MODIFY";
+    readonly baseRevision: number;
+    readonly baseContentHash: string;
+}
+
+export interface PendingDelete extends PendingOperationBase {
+    readonly type: "DELETE";
+    readonly baseRevision: number;
+    readonly baseContentHash: string;
+}
+
+export type PendingOperation = PendingCreate | PendingModify | PendingDelete;
 export type ReplicaState = "PRESENT" | "DELETED";
 
 export interface ReplicaEntry {
@@ -150,9 +169,9 @@ export class ClientStore {
         });
     }
 
-    public async findActiveCreate(
+    public async findActiveOperation(
         path: string,
-    ): Promise<PendingCreate | undefined> {
+    ): Promise<PendingOperation | undefined> {
         const records = await this.pendingRecords();
         return records.find(
             (record) =>
@@ -163,21 +182,27 @@ export class ClientStore {
 
     public async pendingForPath(
         path: string,
-    ): Promise<PendingCreate | undefined> {
+    ): Promise<PendingOperation | undefined> {
         const records = await this.pendingRecords();
         return records.find(
             (record) => record.path === path && record.status !== "COMMITTED",
         );
     }
 
-    public async create(
+    public async operation(
         operationId: string,
-    ): Promise<PendingCreate | undefined> {
+    ): Promise<PendingOperation | undefined> {
         return this.pending(operationId);
     }
 
-    public async saveCreate(
-        pending: PendingCreate,
+    public async create(
+        operationId: string,
+    ): Promise<PendingOperation | undefined> {
+        return this.operation(operationId);
+    }
+
+    public async saveContentOperation(
+        pending: PendingContentOperation,
         content: Blob,
     ): Promise<void> {
         const transaction = this.database.transaction(
@@ -192,7 +217,18 @@ export class ClientStore {
         await transactionDone(transaction);
     }
 
-    public async pendingCreates(): Promise<PendingCreate[]> {
+    public async saveCreate(
+        pending: PendingCreate,
+        content: Blob,
+    ): Promise<void> {
+        await this.saveContentOperation(pending, content);
+    }
+
+    public async saveDelete(pending: PendingDelete): Promise<void> {
+        await this.put(PENDING_STORE, pending);
+    }
+
+    public async pendingOperations(): Promise<PendingOperation[]> {
         const records = await this.pendingRecords();
         return records
             .filter(
@@ -238,12 +274,14 @@ export class ClientStore {
             ...pending,
             status: "COMMITTED",
             failureCode: undefined,
-        } satisfies PendingCreate);
-        transaction.objectStore(ARTIFACT_STORE).delete(pending.artifactId);
+        } satisfies PendingOperation);
+        if (isContentOperation(pending)) {
+            transaction.objectStore(ARTIFACT_STORE).delete(pending.artifactId);
+        }
         await transactionDone(transaction);
     }
 
-    public async completeObservedCreate(operationId: string): Promise<void> {
+    public async completeObservedOperation(operationId: string): Promise<void> {
         const pending = await this.pending(operationId);
 
         if (pending === undefined) {
@@ -255,7 +293,27 @@ export class ClientStore {
             "readwrite",
         );
         transaction.objectStore(PENDING_STORE).delete(operationId);
-        transaction.objectStore(ARTIFACT_STORE).delete(pending.artifactId);
+        if (isContentOperation(pending)) {
+            transaction.objectStore(ARTIFACT_STORE).delete(pending.artifactId);
+        }
+        await transactionDone(transaction);
+    }
+
+    public async discardPending(operationId: string): Promise<void> {
+        const pending = await this.pending(operationId);
+
+        if (pending === undefined) {
+            return;
+        }
+
+        const transaction = this.database.transaction(
+            [PENDING_STORE, ARTIFACT_STORE],
+            "readwrite",
+        );
+        transaction.objectStore(PENDING_STORE).delete(operationId);
+        if (isContentOperation(pending)) {
+            transaction.objectStore(ARTIFACT_STORE).delete(pending.artifactId);
+        }
         await transactionDone(transaction);
     }
 
@@ -307,6 +365,14 @@ export class ClientStore {
         );
     }
 
+    public async hasPreparedRemoteDelete(path: string): Promise<boolean> {
+        const intents = await this.applyIntents();
+        return intents.some(
+            (intent) =>
+                intent.path === path && intent.after.state === "DELETED",
+        );
+    }
+
     public async hasConflict(path: string): Promise<boolean> {
         const conflicts = await this.values<RemoteConflict>(CONFLICT_STORE);
         return conflicts.some((conflict) => conflict.path === path);
@@ -315,7 +381,7 @@ export class ClientStore {
     public async recordRemoteConflict(
         conflict: RemoteConflict,
         serverState: ReplicaEntry,
-        pending?: PendingCreate,
+        pending?: PendingOperation,
     ): Promise<void> {
         const transaction = this.database.transaction(
             [CONFLICT_STORE, PENDING_STORE, REPLICA_STORE],
@@ -329,7 +395,7 @@ export class ClientStore {
                 ...pending,
                 status: "CONFLICT",
                 failureCode: conflict.code,
-            } satisfies PendingCreate);
+            } satisfies PendingOperation);
         }
 
         await transactionDone(transaction);
@@ -345,19 +411,19 @@ export class ClientStore {
         await this.put(METADATA_STORE, metadata);
     }
 
-    private async pendingRecords(): Promise<PendingCreate[]> {
-        return this.values<PendingCreate>(PENDING_STORE);
+    private async pendingRecords(): Promise<PendingOperation[]> {
+        return this.values<PendingOperation>(PENDING_STORE);
     }
 
     private async pending(
         operationId: string,
-    ): Promise<PendingCreate | undefined> {
-        return this.value<PendingCreate>(PENDING_STORE, operationId);
+    ): Promise<PendingOperation | undefined> {
+        return this.value<PendingOperation>(PENDING_STORE, operationId);
     }
 
     private async updatePending(
         operationId: string,
-        update: (pending: PendingCreate) => PendingCreate,
+        update: (pending: PendingOperation) => PendingOperation,
     ): Promise<void> {
         const pending = await this.pending(operationId);
 
@@ -398,6 +464,12 @@ export class ClientStore {
         transaction.objectStore(storeName).delete(key);
         await transactionDone(transaction);
     }
+}
+
+function isContentOperation(
+    pending: PendingOperation,
+): pending is PendingCreate | PendingModify {
+    return pending.type === "CREATE" || pending.type === "MODIFY";
 }
 
 function openDatabase(databaseName: string): Promise<IDBDatabase> {

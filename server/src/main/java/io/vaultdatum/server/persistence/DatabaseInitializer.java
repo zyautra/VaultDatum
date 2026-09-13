@@ -2,6 +2,8 @@ package io.vaultdatum.server.persistence;
 
 import io.vaultdatum.server.config.DataDirectories;
 import io.vaultdatum.server.sync.CreateCoordinator;
+import io.vaultdatum.server.sync.DeleteCoordinator;
+import io.vaultdatum.server.sync.ModifyCoordinator;
 import io.quarkus.runtime.Startup;
 import jakarta.annotation.PostConstruct;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -19,15 +21,23 @@ public final class DatabaseInitializer {
 
     private final CreateCoordinator createCoordinator;
 
+    private final ModifyCoordinator modifyCoordinator;
+
+    private final DeleteCoordinator deleteCoordinator;
+
     public DatabaseInitializer(
             DataDirectories dataDirectories,
             Flyway flyway,
             VaultMetadataRepository vaultMetadataRepository,
-            CreateCoordinator createCoordinator) {
+            CreateCoordinator createCoordinator,
+            ModifyCoordinator modifyCoordinator,
+            DeleteCoordinator deleteCoordinator) {
         this.dataDirectories = dataDirectories;
         this.flyway = flyway;
         this.vaultMetadataRepository = vaultMetadataRepository;
         this.createCoordinator = createCoordinator;
+        this.modifyCoordinator = modifyCoordinator;
+        this.deleteCoordinator = deleteCoordinator;
     }
 
     @PostConstruct
@@ -36,5 +46,7 @@ public final class DatabaseInitializer {
         flyway.migrate();
         vaultMetadataRepository.initialize();
         createCoordinator.recoverPreparedCreates();
+        modifyCoordinator.recoverPreparedModifies();
+        deleteCoordinator.recoverPreparedDeletes();
     }
 }

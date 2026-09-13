@@ -2,8 +2,9 @@ FROM quay.io/quarkus/ubi9-quarkus-micro-image:2.0
 
 WORKDIR /work/
 
-RUN chown 1001:0 /work \
-    && chmod "g+rwX" /work
+RUN mkdir -p /data/state/.sqlite-tmp \
+    && chown -R 1001:0 /work /data \
+    && chmod -R "g+rwX" /work /data
 
 COPY --chown=1001:0 --chmod=0755 build/*-runner /work/application
 

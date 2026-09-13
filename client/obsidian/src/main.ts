@@ -51,7 +51,7 @@ export default class VaultDatumPlugin extends Plugin {
         });
 
         this.app.workspace.onLayoutReady(() => {
-            this.observeNewFiles();
+            this.observeVaultChanges();
             void this.syncNow(false);
         });
     }
@@ -70,7 +70,7 @@ export default class VaultDatumPlugin extends Plugin {
         return this.syncSettings.serverUrl.replace(/\/+$/, "");
     }
 
-    private observeNewFiles(): void {
+    private observeVaultChanges(): void {
         const createSync = this.createSync;
 
         if (createSync === undefined) {
@@ -84,19 +84,41 @@ export default class VaultDatumPlugin extends Plugin {
                 }
 
                 this.captureQueue = this.captureQueue.then(() =>
-                    this.captureCreatedFile(createSync, file),
+                    this.captureContentChange(createSync, file),
+                );
+            }),
+        );
+        this.registerEvent(
+            this.app.vault.on("modify", (file) => {
+                if (!(file instanceof TFile)) {
+                    return;
+                }
+
+                this.captureQueue = this.captureQueue.then(() =>
+                    this.captureContentChange(createSync, file),
+                );
+            }),
+        );
+        this.registerEvent(
+            this.app.vault.on("delete", (file) => {
+                if (!(file instanceof TFile)) {
+                    return;
+                }
+
+                this.captureQueue = this.captureQueue.then(() =>
+                    this.captureDeletedFile(createSync, file.path),
                 );
             }),
         );
     }
 
-    private async captureCreatedFile(
+    private async captureContentChange(
         createSync: CreateSync,
         file: TFile,
     ): Promise<void> {
         try {
             const content = await this.app.vault.readBinary(file);
-            const pending = await createSync.captureCreate(file.path, content);
+            const pending = await createSync.captureModify(file.path, content);
 
             if (pending !== undefined) {
                 void this.syncNow(false);
@@ -107,6 +129,26 @@ export default class VaultDatumPlugin extends Plugin {
             );
             new Notice(
                 "VaultDatum could not queue a newly created file. The local file was not changed.",
+            );
+        }
+    }
+
+    private async captureDeletedFile(
+        createSync: CreateSync,
+        path: string,
+    ): Promise<void> {
+        try {
+            const pending = await createSync.captureDelete(path);
+
+            if (pending !== undefined) {
+                void this.syncNow(false);
+            }
+        } catch {
+            console.warn(
+                "VaultDatum could not persist a deleted file for synchronization",
+            );
+            new Notice(
+                "VaultDatum could not queue a deleted file. The local file was not restored.",
             );
         }
     }

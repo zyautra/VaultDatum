@@ -3,10 +3,19 @@ import { isSyncPath } from "../core/sync-path";
 import {
     ClientStore,
     type PendingCreate,
+    type PendingDelete,
+    type PendingModify,
+    type PendingOperation,
+    type ReplicaEntry,
     VaultMismatchError,
 } from "../storage/client-store";
+import {
+    type RemoteChange,
+    type RemoteChangeEffect,
+    type SubmitOperationResult,
+    type SyncTransport,
+} from "../transport/server-client";
 import { RemoteApply, type LocalVault } from "./remote-apply";
-import type { SyncTransport } from "../transport/server-client";
 
 export interface SyncSummary {
     readonly committed: number;
@@ -37,7 +46,76 @@ export class CreateSync {
     public async captureCreate(
         path: string,
         content: ArrayBuffer,
-    ): Promise<PendingCreate | undefined> {
+    ): Promise<PendingOperation | undefined> {
+        return this.captureContent(path, content);
+    }
+
+    public async captureModify(
+        path: string,
+        content: ArrayBuffer,
+    ): Promise<PendingOperation | undefined> {
+        return this.captureContent(path, content);
+    }
+
+    public async captureDelete(
+        path: string,
+    ): Promise<PendingDelete | undefined> {
+        if (
+            !isSyncPath(path) ||
+            (await this.store.hasPreparedRemoteDelete(path))
+        ) {
+            return undefined;
+        }
+        if (await this.store.hasConflict(path)) {
+            return undefined;
+        }
+
+        const active = await this.store.findActiveOperation(path);
+        if (active?.type === "CREATE" && active.status === "READY") {
+            await this.store.discardPending(active.operationId);
+            return undefined;
+        }
+        if (active?.type === "MODIFY" && active.status === "READY") {
+            await this.store.discardPending(active.operationId);
+        }
+        if (active?.type === "DELETE") {
+            return active;
+        }
+
+        const replica = await this.store.replica(path);
+        if (!isPresentFile(replica)) {
+            return undefined;
+        }
+
+        const clientId = await this.store.clientId();
+        const pending: PendingDelete = {
+            operationId: `OP-${crypto.randomUUID()}`,
+            clientId,
+            type: "DELETE",
+            path,
+            baseRevision: replica.revision,
+            baseContentHash: replica.contentHash,
+            createdAt: new Date().toISOString(),
+            status: "READY",
+        };
+        await this.store.saveDelete(pending);
+        return pending;
+    }
+
+    public sync(): Promise<SyncSummary> {
+        if (this.activeSync === undefined) {
+            this.activeSync = this.runSync().finally(() => {
+                this.activeSync = undefined;
+            });
+        }
+
+        return this.activeSync;
+    }
+
+    private async captureContent(
+        path: string,
+        content: ArrayBuffer,
+    ): Promise<PendingOperation | undefined> {
         if (!isSyncPath(path)) {
             return undefined;
         }
@@ -50,17 +128,47 @@ export class CreateSync {
             return undefined;
         }
 
+        const active = await this.store.findActiveOperation(path);
+        if (active !== undefined) {
+            if (active.type === "DELETE") {
+                return active;
+            }
+            const updated = {
+                ...active,
+                contentHash: hash,
+                size: content.byteLength,
+            };
+            await this.store.saveContentOperation(updated, new Blob([content]));
+            return updated;
+        }
+
         const replica = await this.store.replica(path);
         if (replica?.state === "PRESENT" && replica.contentHash === hash) {
             return undefined;
         }
 
-        const existing = await this.store.findActiveCreate(path);
-        if (existing !== undefined) {
-            return existing;
+        const clientId = await this.store.clientId();
+        if (isPresentFile(replica)) {
+            const pending: PendingModify = {
+                operationId: `OP-${crypto.randomUUID()}`,
+                clientId,
+                type: "MODIFY",
+                path,
+                baseRevision: replica.revision,
+                baseContentHash: replica.contentHash,
+                contentHash: hash,
+                size: content.byteLength,
+                artifactId: `artifact-${crypto.randomUUID()}`,
+                createdAt: new Date().toISOString(),
+                status: "READY",
+            };
+            await this.store.saveContentOperation(pending, new Blob([content]));
+            return pending;
+        }
+        if (replica?.state === "DELETED") {
+            return undefined;
         }
 
-        const clientId = await this.store.clientId();
         const pending: PendingCreate = {
             operationId: `OP-${crypto.randomUUID()}`,
             clientId,
@@ -72,19 +180,8 @@ export class CreateSync {
             createdAt: new Date().toISOString(),
             status: "READY",
         };
-
-        await this.store.saveCreate(pending, new Blob([content]));
+        await this.store.saveContentOperation(pending, new Blob([content]));
         return pending;
-    }
-
-    public sync(): Promise<SyncSummary> {
-        if (this.activeSync === undefined) {
-            this.activeSync = this.runSync().finally(() => {
-                this.activeSync = undefined;
-            });
-        }
-
-        return this.activeSync;
     }
 
     private async runSync(): Promise<SyncSummary> {
@@ -151,18 +248,23 @@ export class CreateSync {
             return { conflicted: 0, unavailable: true };
         }
 
-        let state = await this.store.confirmVault(vault.value.vaultId);
-        let conflicted = 0;
+        const state = await this.store.confirmVault(vault.value.vaultId);
+        if (state.serverCursor >= vault.value.currentRevision) {
+            return { conflicted: 0, unavailable: false };
+        }
 
-        while (state.serverCursor < vault.value.currentRevision) {
+        let cursor = state.serverCursor;
+        const changes: RemoteChange[] = [];
+
+        while (cursor < vault.value.currentRevision) {
             const page = await this.serverClient.listChanges(
                 serverUrl,
-                state.serverCursor,
+                cursor,
                 500,
             );
 
             if (page.kind !== "OK") {
-                return { conflicted, unavailable: true };
+                return { conflicted: 0, unavailable: true };
             }
             if (page.value.vaultId !== vault.value.vaultId) {
                 throw new Error(
@@ -171,24 +273,19 @@ export class CreateSync {
             }
             if (
                 page.value.changes.length === 0 ||
-                page.value.toInclusive < state.serverCursor
+                page.value.toInclusive < cursor
             ) {
                 throw new Error("Server returned an incomplete change page");
             }
 
-            let expectedRevision = state.serverCursor + 1;
+            let expectedRevision = cursor + 1;
             for (const change of page.value.changes) {
                 if (change.revision !== expectedRevision) {
                     throw new Error(
                         "Server change revisions are not contiguous",
                     );
                 }
-
-                const integrated = await this.remoteApply.integrateChange(
-                    serverUrl,
-                    change,
-                );
-                conflicted += integrated.conflicted;
+                changes.push(change);
                 expectedRevision += 1;
             }
             if (page.value.toInclusive !== expectedRevision - 1) {
@@ -197,17 +294,41 @@ export class CreateSync {
                 );
             }
 
-            await this.store.advanceCursor(
-                vault.value.vaultId,
-                page.value.toInclusive,
-            );
-            state = await this.store.syncState();
-
+            cursor = page.value.toInclusive;
             if (!page.value.hasMore) {
                 break;
             }
         }
 
+        let conflicted = 0;
+        const integratedOwnEffects = new Set<string>();
+        for (const change of changes) {
+            if (!(await this.isTrackedOwnChange(change))) {
+                continue;
+            }
+
+            const integrated = await this.remoteApply.integrateChange(
+                serverUrl,
+                change,
+            );
+            conflicted += integrated.conflicted;
+            for (const effect of change.effects) {
+                integratedOwnEffects.add(effectKey(change, effect));
+            }
+        }
+        for (const change of latestPathEffects(changes)) {
+            if (
+                integratedOwnEffects.has(effectKey(change, change.effects[0]))
+            ) {
+                continue;
+            }
+            const integrated = await this.remoteApply.integrateChange(
+                serverUrl,
+                change,
+            );
+            conflicted += integrated.conflicted;
+        }
+        await this.store.advanceCursor(vault.value.vaultId, cursor);
         return { conflicted, unavailable: false };
     }
 
@@ -218,29 +339,14 @@ export class CreateSync {
     }> {
         let committed = 0;
         let conflicted = 0;
-        const pendingCreates = await this.store.pendingCreates();
+        const pendingOperations = await this.store.pendingOperations();
 
-        for (const pending of pendingCreates) {
-            const artifact = await this.store.artifact(pending.artifactId);
-
-            if (artifact === undefined) {
-                await this.store.markConflict(
-                    pending.operationId,
-                    "LOCAL_ARTIFACT_MISSING",
-                );
-                conflicted += 1;
-                continue;
-            }
-
+        for (const pending of pendingOperations) {
             await this.store.markInFlight(pending.operationId);
 
-            let result;
+            let result: SubmitOperationResult;
             try {
-                result = await this.serverClient.submitCreate(
-                    serverUrl,
-                    pending,
-                    artifact,
-                );
+                result = await this.submit(serverUrl, pending);
             } catch {
                 return { committed, conflicted, offline: true };
             }
@@ -261,6 +367,79 @@ export class CreateSync {
 
         return { committed, conflicted, offline: false };
     }
+
+    private async submit(
+        serverUrl: string,
+        pending: PendingOperation,
+    ): Promise<SubmitOperationResult> {
+        if (pending.type === "DELETE") {
+            return this.serverClient.submitDelete(serverUrl, pending);
+        }
+
+        const artifact = await this.store.artifact(pending.artifactId);
+        if (artifact === undefined) {
+            await this.store.markConflict(
+                pending.operationId,
+                "LOCAL_ARTIFACT_MISSING",
+            );
+            return { kind: "REJECTED", code: "LOCAL_ARTIFACT_MISSING" };
+        }
+
+        if (pending.type === "CREATE") {
+            return this.serverClient.submitCreate(serverUrl, pending, artifact);
+        }
+        return this.serverClient.submitModify(serverUrl, pending, artifact);
+    }
+
+    private async isTrackedOwnChange(change: RemoteChange): Promise<boolean> {
+        if (change.actor.type !== "CLIENT") {
+            return false;
+        }
+
+        const pending = await this.store.operation(change.operationId);
+        return pending?.clientId === change.actor.clientId;
+    }
+}
+
+function isPresentFile(
+    entry: ReplicaEntry | undefined,
+): entry is ReplicaEntry & {
+    readonly entryType: "FILE";
+    readonly state: "PRESENT";
+    readonly contentHash: string;
+    readonly size: number;
+} {
+    return (
+        entry?.entryType === "FILE" &&
+        entry.state === "PRESENT" &&
+        entry.contentHash !== undefined &&
+        entry.size !== undefined
+    );
+}
+
+function latestPathEffects(changes: readonly RemoteChange[]): RemoteChange[] {
+    const latest = new Map<string, RemoteChange>();
+
+    for (const change of changes) {
+        for (const effect of change.effects) {
+            latest.set(effect.path, singleEffectChange(change, effect));
+        }
+    }
+
+    return [...latest.values()].sort(
+        (left, right) => left.revision - right.revision,
+    );
+}
+
+function singleEffectChange(
+    change: RemoteChange,
+    effect: RemoteChangeEffect,
+): RemoteChange {
+    return { ...change, effects: [effect] };
+}
+
+function effectKey(change: RemoteChange, effect: RemoteChangeEffect): string {
+    return `${change.revision}:${effect.path}`;
 }
 
 function unavailable(committed: number, conflicted: number): SyncSummary {

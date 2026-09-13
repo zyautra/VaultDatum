@@ -35,7 +35,13 @@ public final class CreateCoordinator {
         this.dsl = dsl;
     }
 
-    public synchronized CreateOperationResult commit(CreateOperation operation, Path stagedContent) {
+    public CreateOperationResult commit(CreateOperation operation, Path stagedContent) {
+        synchronized (MutationLock.INSTANCE) {
+            return commitLocked(operation, stagedContent);
+        }
+    }
+
+    private CreateOperationResult commitLocked(CreateOperation operation, Path stagedContent) {
         CreateOperationResult replayed = existingResult(operation);
 
         if (replayed != null) {
@@ -50,7 +56,13 @@ public final class CreateCoordinator {
         return finalize(operation);
     }
 
-    public synchronized void recoverPreparedCreates() {
+    public void recoverPreparedCreates() {
+        synchronized (MutationLock.INSTANCE) {
+            recoverPreparedCreatesLocked();
+        }
+    }
+
+    private void recoverPreparedCreatesLocked() {
         Operations operations = OPERATIONS.as("operations");
         OperationCreate operationCreates = OPERATION_CREATE.as("operation_create");
         var preparedOperations = dsl.select(
@@ -109,7 +121,7 @@ public final class CreateCoordinator {
         Path target = operation.path().resolveUnder(dataDirectories.vault());
 
         if (Files.exists(target)) {
-            throw new CreateConflictException("The create path already exists in the authoritative Vault");
+            throw new BaseStateMismatchException("The create path already exists in the authoritative Vault");
         }
     }
 
@@ -120,7 +132,7 @@ public final class CreateCoordinator {
                     transaction.selectOne().from(PATH_STATE).where(PATH_STATE.PATH.eq(operation.path().value())));
 
             if (knownPath) {
-                throw new CreateConflictException("The create path is already known to the server");
+                throw new BaseStateMismatchException("The create path is already known to the server");
             }
 
             transaction.insertInto(OPERATIONS)

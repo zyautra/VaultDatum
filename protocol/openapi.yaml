@@ -585,6 +585,7 @@ components:
         - path
         - state
         - revision
+        - contentHash
       properties:
         path:
           $ref: "#/components/schemas/SyncPath"

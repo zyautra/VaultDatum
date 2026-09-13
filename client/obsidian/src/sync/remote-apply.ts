@@ -3,7 +3,7 @@ import { isSyncPath } from "../core/sync-path";
 import {
     type ApplyIntent,
     ClientStore,
-    type PendingCreate,
+    type PendingOperation,
     type ReplicaEntry,
     type RemoteConflict,
 } from "../storage/client-store";
@@ -86,13 +86,13 @@ export class RemoteApply {
             return false;
         }
 
-        const submitted = await this.store.create(change.operationId);
+        const submitted = await this.store.operation(change.operationId);
         const actual = await this.localHash(effect.path);
 
         if (submitted !== undefined && isOwnChange(change, submitted)) {
             if (matches(after, actual)) {
                 await this.store.putReplica(after);
-                await this.store.completeObservedCreate(change.operationId);
+                await this.store.completeObservedOperation(change.operationId);
                 return false;
             }
 
@@ -201,7 +201,7 @@ export class RemoteApply {
         path: string,
         serverState: ReplicaEntry,
         code: string,
-        pending?: PendingCreate,
+        pending?: PendingOperation,
         operationId?: string,
     ): Promise<void> {
         const conflict: RemoteConflict = {
@@ -266,8 +266,12 @@ function matches(
     return expected.entryType === "FILE" && expected.contentHash === actualHash;
 }
 
-function isOwnChange(change: RemoteChange, committed: PendingCreate): boolean {
+function isOwnChange(
+    change: RemoteChange,
+    committed: PendingOperation,
+): boolean {
     return (
+        change.operationId === committed.operationId &&
         change.actor.type === "CLIENT" &&
         change.actor.clientId === committed.clientId
     );

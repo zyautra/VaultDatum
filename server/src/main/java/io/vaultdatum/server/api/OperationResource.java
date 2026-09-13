@@ -4,11 +4,15 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.vaultdatum.server.config.DataDirectories;
 import io.vaultdatum.server.sync.ContentHash;
-import io.vaultdatum.server.sync.CreateConflictException;
+import io.vaultdatum.server.sync.BaseStateMismatchException;
 import io.vaultdatum.server.sync.CreateCoordinator;
 import io.vaultdatum.server.sync.CreateOperation;
 import io.vaultdatum.server.sync.CreateOperationResult;
+import io.vaultdatum.server.sync.ModifyCoordinator;
+import io.vaultdatum.server.sync.ModifyOperation;
+import io.vaultdatum.server.sync.OperationResult;
 import io.vaultdatum.server.sync.OperationIdReuseException;
+import io.vaultdatum.server.sync.PresentBase;
 import io.vaultdatum.server.sync.RecoveryRequiredException;
 import io.vaultdatum.server.sync.SyncPath;
 import io.quarkus.runtime.annotations.RegisterForReflection;
@@ -35,28 +39,32 @@ public final class OperationResource {
 
     private final CreateCoordinator createCoordinator;
 
+    private final ModifyCoordinator modifyCoordinator;
+
     public OperationResource(
             ObjectMapper objectMapper,
             DataDirectories dataDirectories,
-            CreateCoordinator createCoordinator) {
+            CreateCoordinator createCoordinator,
+            ModifyCoordinator modifyCoordinator) {
         this.objectMapper = objectMapper;
         this.dataDirectories = dataDirectories;
         this.createCoordinator = createCoordinator;
+        this.modifyCoordinator = modifyCoordinator;
     }
 
     @POST
-    public Response submitCreate(
+    public Response submitContentMutation(
             @RestForm("operation") String serializedOperation,
             @RestForm("content") FileUpload uploadedContent) {
-        CreateOperation operation;
+        ContentMutationRequest request;
 
         try {
-            operation = validate(parse(serializedOperation));
+            request = parse(serializedOperation);
         } catch (IllegalArgumentException exception) {
             return error(Response.Status.BAD_REQUEST.getStatusCode(), "INVALID_REQUEST", exception.getMessage());
         }
         if (uploadedContent == null) {
-            return error(Response.Status.BAD_REQUEST.getStatusCode(), "INVALID_REQUEST", "Content is required for CREATE.");
+            return error(Response.Status.BAD_REQUEST.getStatusCode(), "INVALID_REQUEST", "Content is required for this operation.");
         }
 
         java.nio.file.Path stagedContent = null;
@@ -64,16 +72,25 @@ public final class OperationResource {
             stagedContent = Files.createTempFile(dataDirectories.staging(), "upload-", ".tmp");
             ContentHash.HashedContent actualContent = ContentHash.copy(uploadedContent.uploadedFile(), stagedContent);
 
-            if (!actualContent.value().equals(operation.contentHash()) || actualContent.size() != operation.size()) {
+            if (request.content() == null || !actualContent.value().equals(request.content().contentHash())
+                    || actualContent.size() != request.content().size()) {
                 Files.deleteIfExists(stagedContent);
                 return error(422, "CONTENT_HASH_MISMATCH",
                         "Uploaded content does not match the declared hash and size.");
             }
 
-            CreateOperationResult result = createCoordinator.commit(operation, stagedContent);
-            return Response.ok(new OperationResultResponse(
-                    result.operationId(), "COMMITTED", result.resultRevision(), result.replayed())).build();
-        } catch (CreateConflictException exception) {
+            if ("CREATE".equals(request.type())) {
+                CreateOperation operation = createOperation(request, actualContent);
+                return Response.ok(response(createCoordinator.commit(operation, stagedContent))).build();
+            }
+            if ("MODIFY".equals(request.type())) {
+                ModifyOperation operation = modifyOperation(request, actualContent);
+                return Response.ok(response(modifyCoordinator.commit(operation, stagedContent))).build();
+            }
+
+            return error(Response.Status.BAD_REQUEST.getStatusCode(), "INVALID_REQUEST",
+                    "Only CREATE and MODIFY content operations are supported");
+        } catch (BaseStateMismatchException exception) {
             deleteIfPresent(stagedContent);
             return error(Response.Status.CONFLICT.getStatusCode(), "BASE_STATE_MISMATCH", exception.getMessage());
         } catch (OperationIdReuseException exception) {
@@ -81,6 +98,9 @@ public final class OperationResource {
             return error(Response.Status.CONFLICT.getStatusCode(), "OPERATION_ID_REUSED", exception.getMessage());
         } catch (RecoveryRequiredException exception) {
             return error(Response.Status.SERVICE_UNAVAILABLE.getStatusCode(), "RECOVERY_REQUIRED", exception.getMessage());
+        } catch (IllegalArgumentException exception) {
+            deleteIfPresent(stagedContent);
+            return error(Response.Status.BAD_REQUEST.getStatusCode(), "INVALID_REQUEST", exception.getMessage());
         } catch (IOException exception) {
             deleteIfPresent(stagedContent);
             throw new IllegalStateException("Could not create staging file", exception);
@@ -99,15 +119,17 @@ public final class OperationResource {
         }
     }
 
-    private CreateRequest parse(String serializedOperation) {
+    private ContentMutationRequest parse(String serializedOperation) {
         try {
-            return objectMapper.readValue(serializedOperation, CreateRequest.class);
+            return objectMapper.readValue(serializedOperation, ContentMutationRequest.class);
         } catch (JsonProcessingException exception) {
             throw new IllegalArgumentException("Operation metadata must be valid JSON", exception);
         }
     }
 
-    private CreateOperation validate(CreateRequest request) {
+    private CreateOperation createOperation(
+            ContentMutationRequest request,
+            ContentHash.HashedContent actualContent) {
         if (request == null || !"CREATE".equals(request.type()) || request.content() == null
                 || request.base() == null || request.base().length != 1
                 || !"UNKNOWN".equals(request.base()[0].state())) {
@@ -115,15 +137,59 @@ public final class OperationResource {
         }
 
         SyncPath path = SyncPath.parse(request.path());
-        if (!path.value().equals(request.base()[0].path()) || request.operationId() == null || request.clientId() == null
-                || request.operationId().isBlank() || request.clientId().isBlank() || request.content().size() < 0
-                || request.content().contentHash() == null
-                || !request.content().contentHash().matches("sha256:[0-9a-f]{64}")) {
-            throw new IllegalArgumentException("CREATE metadata is invalid");
+        validateCommon(request, path);
+        if (request.content().size() != actualContent.size() || !request.content().contentHash().equals(actualContent.value())) {
+            throw new IllegalArgumentException("CREATE content metadata is invalid");
         }
 
         return new CreateOperation(
                 request.operationId(), request.clientId(), path, request.content().contentHash(), request.content().size());
+    }
+
+    private ModifyOperation modifyOperation(
+            ContentMutationRequest request,
+            ContentHash.HashedContent actualContent) {
+        if (request == null || !"MODIFY".equals(request.type()) || request.content() == null
+                || request.base() == null || request.base().length != 1
+                || !"PRESENT".equals(request.base()[0].state())
+                || request.base()[0].revision() == null || request.base()[0].revision() < 1
+                || request.base()[0].contentHash() == null
+                || !request.base()[0].contentHash().matches("sha256:[0-9a-f]{64}")) {
+            throw new IllegalArgumentException("Only a MODIFY operation with a PRESENT base is supported");
+        }
+
+        SyncPath path = SyncPath.parse(request.path());
+        validateCommon(request, path);
+        if (request.content().size() != actualContent.size() || !request.content().contentHash().equals(actualContent.value())) {
+            throw new IllegalArgumentException("MODIFY content metadata is invalid");
+        }
+
+        return new ModifyOperation(
+                request.operationId(),
+                request.clientId(),
+                path,
+                new PresentBase(request.base()[0].revision(), request.base()[0].contentHash()),
+                request.content().contentHash(),
+                request.content().size());
+    }
+
+    private void validateCommon(ContentMutationRequest request, SyncPath path) {
+        if (!path.value().equals(request.base()[0].path()) || request.operationId() == null || request.clientId() == null
+                || request.operationId().isBlank() || request.clientId().isBlank() || request.content().size() < 0
+                || request.content().contentHash() == null
+                || !request.content().contentHash().matches("sha256:[0-9a-f]{64}")) {
+            throw new IllegalArgumentException("Content operation metadata is invalid");
+        }
+    }
+
+    private static OperationResultResponse response(CreateOperationResult result) {
+        return new OperationResultResponse(
+                result.operationId(), "COMMITTED", result.resultRevision(), result.replayed());
+    }
+
+    private static OperationResultResponse response(OperationResult result) {
+        return new OperationResultResponse(
+                result.operationId(), "COMMITTED", result.resultRevision(), result.replayed());
     }
 
     private Response error(int status, String code, String message) {
@@ -131,12 +197,12 @@ public final class OperationResource {
     }
 
     @RegisterForReflection
-    public record CreateRequest(String operationId, String clientId, String type, String path,
+    public record ContentMutationRequest(String operationId, String clientId, String type, String path,
                                 BaseCondition[] base, Content content) {
     }
 
     @RegisterForReflection
-    public record BaseCondition(String path, String state) {
+    public record BaseCondition(String path, String state, Long revision, String contentHash) {
     }
 
     @RegisterForReflection

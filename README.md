@@ -35,29 +35,32 @@ npm --prefix client/obsidian run build
 ```
 
 The health endpoint is available at `GET /health` on port 8080. The server also
-exposes `GET /api/v1/vault` and the first mutation endpoint,
-`POST /api/v1/operations` for multipart `CREATE` requests.
+exposes `GET /api/v1/vault` and `POST /api/v1/operations` for multipart
+`CREATE`/`MODIFY` and JSON `DELETE` requests.
 
 ## Current Sync Slice
 
 The Obsidian plugin has a **Server URL** setting. After the plugin has started,
-a newly created file outside `.obsidian/` is read as binary data, hashed, and
-stored with a pending CREATE record in IndexedDB before it is eligible for
-upload. The same stored snapshot and operation ID are retried after an
-interrupted request or a plugin restart. A server commit removes the local
-artifact, but retains a lightweight committed operation marker until its own
-change-journal entry is observed. A conflict remains durable and is not
-silently overwritten.
+a new, modified, or deleted file outside `.obsidian/` is captured as a durable
+CREATE, MODIFY, or DELETE operation before it is eligible for upload. MODIFY
+and DELETE retain the last replicated revision and content hash as their base
+condition. The same stored snapshot and operation ID are retried after an
+interrupted request or a plugin restart. A server commit removes a local
+content artifact, but retains a lightweight committed operation marker until
+its own change-journal entry is observed. A conflict remains durable and is
+not silently overwritten.
 
 The client pulls the server change journal before and after pushing. It stores
 the server cursor, per-path replica state, conflicts, and remote-apply intents
-in IndexedDB. A second empty client therefore downloads a server-created file
-through `GET /api/v1/changes` and conditional `GET /api/v1/content`. Existing
-local content at the same path becomes a conflict; it is never overwritten.
+in IndexedDB. A second empty client therefore downloads a server-created or
+modified file through `GET /api/v1/changes` and conditional `GET /api/v1/content`,
+and removes a matching replica when it observes a server delete. When a page
+contains several revisions for one path, it applies the final state rather than
+asking the server for content that is no longer current. Existing divergent
+local content becomes a conflict; it is never overwritten.
 
-This slice deliberately supports only newly observed `CREATE` operations and
-remote application of server-created files. It does not yet import an existing
-Vault, synchronize local modify/delete/rename/move operations, or offer a
+This slice does not yet import an existing Vault, synchronize rename or move
+operations, restore a locally recreated tombstoned path, or offer a
 conflict-resolution UI.
 
 ## Update Client Protocol Types
