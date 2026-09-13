@@ -10,19 +10,21 @@
     "dev": "node esbuild.config.mjs",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "lint": "eslint src",
+    "lint": "eslint src tests",
     "protocol:check": "npm run protocol:generate && git diff --exit-code -- src/transport/generated/protocol.ts",
     "protocol:generate": "npm --prefix ../../protocol run generate && prettier --write src/transport/generated/protocol.ts",
-    "test": "npm run check"
+    "test": "npm run check && npm run test:remote-apply",
+    "test:remote-apply": "esbuild tests/remote-apply.test.ts --bundle --platform=node --format=esm --target=node24 --outfile=build/remote-apply.test.mjs && node build/remote-apply.test.mjs"
   },
   "devDependencies": {
-    "@types/node": "22.20.2",
     "@eslint/js": "10.0.1",
+    "@types/node": "22.20.2",
     "esbuild": "0.28.2",
     "eslint": "10.10.0",
+    "fake-indexeddb": "^6.2.5",
     "obsidian": "1.13.1",
     "prettier": "3.9.6",
-    "typescript-eslint": "8.70.0",
-    "typescript": "6.0.3"
+    "typescript": "6.0.3",
+    "typescript-eslint": "8.70.0"
   }
 }

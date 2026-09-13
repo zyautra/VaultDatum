@@ -147,11 +147,4 @@ public final class OperationResource {
     public record OperationResultResponse(String operationId, String status, long resultRevision, boolean replayed) {
     }
 
-    @RegisterForReflection
-    public record ProtocolErrorResponse(ErrorResponse error) {
-    }
-
-    @RegisterForReflection
-    public record ErrorResponse(String code, String message) {
-    }
 }

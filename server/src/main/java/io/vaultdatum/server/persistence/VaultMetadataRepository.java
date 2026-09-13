@@ -36,7 +36,11 @@ public final class VaultMetadataRepository {
     }
 
     public VaultMetadata current() {
-        VaultMetadata metadata = find(dsl);
+        return current(dsl);
+    }
+
+    public VaultMetadata current(DSLContext context) {
+        VaultMetadata metadata = find(context);
 
         if (metadata == null) {
             throw new IllegalStateException("Vault metadata has not been initialized");

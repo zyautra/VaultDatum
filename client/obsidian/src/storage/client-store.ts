@@ -1,4 +1,4 @@
-export type PendingStatus = "READY" | "IN_FLIGHT" | "CONFLICT";
+export type PendingStatus = "READY" | "IN_FLIGHT" | "CONFLICT" | "COMMITTED";
 
 export interface PendingCreate {
     readonly operationId: string;
@@ -13,9 +13,54 @@ export interface PendingCreate {
     readonly failureCode?: string;
 }
 
-interface ClientMetadata {
+export type ReplicaState = "PRESENT" | "DELETED";
+
+export interface ReplicaEntry {
+    readonly path: string;
+    readonly entryType: "FILE" | "DIRECTORY";
+    readonly state: ReplicaState;
+    readonly revision: number;
+    readonly contentHash?: string;
+    readonly size?: number;
+}
+
+export interface ClientSyncState {
+    readonly vaultId?: string;
+    readonly serverCursor: number;
+}
+
+export interface ApplyIntent {
+    readonly applyId: string;
+    readonly path: string;
+    readonly before?: ReplicaEntry;
+    readonly after: ReplicaEntry;
+}
+
+export interface RemoteConflict {
+    readonly conflictId: string;
+    readonly path: string;
+    readonly revision: number;
+    readonly code: string;
+    readonly serverState: ReplicaEntry;
+    readonly operationId?: string;
+}
+
+export class VaultMismatchError extends Error {
+    public constructor(expectedVaultId: string, actualVaultId: string) {
+        super(
+            `VaultDatum sync state belongs to ${expectedVaultId}, not ${actualVaultId}.`,
+        );
+    }
+}
+
+interface ClientIdMetadata {
     readonly key: "client-id";
     readonly value: string;
+}
+
+interface SyncStateMetadata {
+    readonly key: "sync-state";
+    readonly value: ClientSyncState;
 }
 
 interface Artifact {
@@ -23,17 +68,19 @@ interface Artifact {
     readonly content: Blob;
 }
 
-const DATABASE_VERSION = 1;
+const DATABASE_VERSION = 2;
 const METADATA_STORE = "metadata";
 const PENDING_STORE = "pending";
 const ARTIFACT_STORE = "artifact";
+const REPLICA_STORE = "replica";
+const APPLY_STORE = "apply";
+const CONFLICT_STORE = "conflict";
 
 export class ClientStore {
     private constructor(private readonly database: IDBDatabase) {}
 
     public static async open(databaseName: string): Promise<ClientStore> {
-        const database = await openDatabase(databaseName);
-        return new ClientStore(database);
+        return new ClientStore(await openDatabase(databaseName));
     }
 
     public close(): void {
@@ -41,41 +88,92 @@ export class ClientStore {
     }
 
     public async clientId(): Promise<string> {
-        const transaction = this.database.transaction(
-            METADATA_STORE,
-            "readonly",
-        );
-        const metadata = await requestValue<ClientMetadata | undefined>(
-            transaction.objectStore(METADATA_STORE).get("client-id"),
-        );
-        await transactionDone(transaction);
+        const metadata = await this.metadata<ClientIdMetadata>("client-id");
 
-        if (
-            metadata !== undefined &&
-            typeof metadata.value === "string" &&
-            metadata.value.length > 0
-        ) {
+        if (metadata?.value.length) {
             return metadata.value;
         }
 
         const clientId = `C-${crypto.randomUUID()}`;
-        const writeTransaction = this.database.transaction(
-            METADATA_STORE,
-            "readwrite",
-        );
-        writeTransaction.objectStore(METADATA_STORE).put({
-            key: "client-id",
-            value: clientId,
-        } satisfies ClientMetadata);
-        await transactionDone(writeTransaction);
+        await this.saveMetadata({ key: "client-id", value: clientId });
         return clientId;
+    }
+
+    public async syncState(): Promise<ClientSyncState> {
+        const metadata = await this.metadata<SyncStateMetadata>("sync-state");
+
+        if (
+            metadata !== undefined &&
+            typeof metadata.value.serverCursor === "number" &&
+            Number.isSafeInteger(metadata.value.serverCursor) &&
+            metadata.value.serverCursor >= 0
+        ) {
+            return metadata.value;
+        }
+
+        return { serverCursor: 0 };
+    }
+
+    public async confirmVault(vaultId: string): Promise<ClientSyncState> {
+        const state = await this.syncState();
+
+        if (state.vaultId !== undefined && state.vaultId !== vaultId) {
+            throw new VaultMismatchError(state.vaultId, vaultId);
+        }
+        if (state.vaultId === vaultId) {
+            return state;
+        }
+
+        const confirmed = { ...state, vaultId };
+        await this.saveMetadata({ key: "sync-state", value: confirmed });
+        return confirmed;
+    }
+
+    public async advanceCursor(
+        vaultId: string,
+        serverCursor: number,
+    ): Promise<void> {
+        const state = await this.confirmVault(vaultId);
+
+        if (
+            !Number.isSafeInteger(serverCursor) ||
+            serverCursor < state.serverCursor
+        ) {
+            throw new Error(
+                "VaultDatum server cursor must advance monotonically",
+            );
+        }
+
+        await this.saveMetadata({
+            key: "sync-state",
+            value: { vaultId, serverCursor },
+        });
     }
 
     public async findActiveCreate(
         path: string,
     ): Promise<PendingCreate | undefined> {
         const records = await this.pendingRecords();
-        return records.find((record) => record.path === path);
+        return records.find(
+            (record) =>
+                record.path === path &&
+                (record.status === "READY" || record.status === "IN_FLIGHT"),
+        );
+    }
+
+    public async pendingForPath(
+        path: string,
+    ): Promise<PendingCreate | undefined> {
+        const records = await this.pendingRecords();
+        return records.find(
+            (record) => record.path === path && record.status !== "COMMITTED",
+        );
+    }
+
+    public async create(
+        operationId: string,
+    ): Promise<PendingCreate | undefined> {
+        return this.pending(operationId);
     }
 
     public async saveCreate(
@@ -125,41 +223,136 @@ export class ClientStore {
         }));
     }
 
-    public async artifact(artifactId: string): Promise<Blob | undefined> {
+    public async markCommitted(operationId: string): Promise<void> {
+        const pending = await this.pending(operationId);
+
+        if (pending === undefined) {
+            return;
+        }
+
         const transaction = this.database.transaction(
-            ARTIFACT_STORE,
-            "readonly",
+            [PENDING_STORE, ARTIFACT_STORE],
+            "readwrite",
         );
-        const artifact = await requestValue<Artifact | undefined>(
-            transaction.objectStore(ARTIFACT_STORE).get(artifactId),
-        );
+        transaction.objectStore(PENDING_STORE).put({
+            ...pending,
+            status: "COMMITTED",
+            failureCode: undefined,
+        } satisfies PendingCreate);
+        transaction.objectStore(ARTIFACT_STORE).delete(pending.artifactId);
         await transactionDone(transaction);
-        return artifact?.content;
     }
 
-    public async removeCommitted(
-        operationId: string,
-        artifactId: string,
-    ): Promise<void> {
+    public async completeObservedCreate(operationId: string): Promise<void> {
+        const pending = await this.pending(operationId);
+
+        if (pending === undefined) {
+            return;
+        }
+
         const transaction = this.database.transaction(
             [PENDING_STORE, ARTIFACT_STORE],
             "readwrite",
         );
         transaction.objectStore(PENDING_STORE).delete(operationId);
-        transaction.objectStore(ARTIFACT_STORE).delete(artifactId);
+        transaction.objectStore(ARTIFACT_STORE).delete(pending.artifactId);
         await transactionDone(transaction);
     }
 
-    private async pendingRecords(): Promise<PendingCreate[]> {
+    public async artifact(artifactId: string): Promise<Blob | undefined> {
+        const artifact = await this.value<Artifact>(ARTIFACT_STORE, artifactId);
+        return artifact?.content;
+    }
+
+    public async replica(path: string): Promise<ReplicaEntry | undefined> {
+        return this.value<ReplicaEntry>(REPLICA_STORE, path);
+    }
+
+    public async putReplica(entry: ReplicaEntry): Promise<void> {
+        await this.put(REPLICA_STORE, entry);
+    }
+
+    public async applyIntents(): Promise<ApplyIntent[]> {
+        return this.values<ApplyIntent>(APPLY_STORE);
+    }
+
+    public async prepareApply(intent: ApplyIntent): Promise<void> {
+        await this.put(APPLY_STORE, intent);
+    }
+
+    public async discardApply(applyId: string): Promise<void> {
+        await this.delete(APPLY_STORE, applyId);
+    }
+
+    public async completeApply(intent: ApplyIntent): Promise<void> {
         const transaction = this.database.transaction(
-            PENDING_STORE,
-            "readonly",
+            [APPLY_STORE, REPLICA_STORE],
+            "readwrite",
         );
-        const records = await requestValue<PendingCreate[]>(
-            transaction.objectStore(PENDING_STORE).getAll(),
-        );
+        transaction.objectStore(REPLICA_STORE).put(intent.after);
+        transaction.objectStore(APPLY_STORE).delete(intent.applyId);
         await transactionDone(transaction);
-        return records;
+    }
+
+    public async hasPreparedRemoteApply(
+        path: string,
+        contentHash: string,
+    ): Promise<boolean> {
+        const intents = await this.applyIntents();
+        return intents.some(
+            (intent) =>
+                intent.path === path &&
+                intent.after.state === "PRESENT" &&
+                intent.after.contentHash === contentHash,
+        );
+    }
+
+    public async hasConflict(path: string): Promise<boolean> {
+        const conflicts = await this.values<RemoteConflict>(CONFLICT_STORE);
+        return conflicts.some((conflict) => conflict.path === path);
+    }
+
+    public async recordRemoteConflict(
+        conflict: RemoteConflict,
+        serverState: ReplicaEntry,
+        pending?: PendingCreate,
+    ): Promise<void> {
+        const transaction = this.database.transaction(
+            [CONFLICT_STORE, PENDING_STORE, REPLICA_STORE],
+            "readwrite",
+        );
+        transaction.objectStore(CONFLICT_STORE).put(conflict);
+        transaction.objectStore(REPLICA_STORE).put(serverState);
+
+        if (pending !== undefined) {
+            transaction.objectStore(PENDING_STORE).put({
+                ...pending,
+                status: "CONFLICT",
+                failureCode: conflict.code,
+            } satisfies PendingCreate);
+        }
+
+        await transactionDone(transaction);
+    }
+
+    private async metadata<T>(key: string): Promise<T | undefined> {
+        return this.value<T>(METADATA_STORE, key);
+    }
+
+    private async saveMetadata(
+        metadata: ClientIdMetadata | SyncStateMetadata,
+    ): Promise<void> {
+        await this.put(METADATA_STORE, metadata);
+    }
+
+    private async pendingRecords(): Promise<PendingCreate[]> {
+        return this.values<PendingCreate>(PENDING_STORE);
+    }
+
+    private async pending(
+        operationId: string,
+    ): Promise<PendingCreate | undefined> {
+        return this.value<PendingCreate>(PENDING_STORE, operationId);
     }
 
     private async updatePending(
@@ -169,27 +362,41 @@ export class ClientStore {
         const pending = await this.pending(operationId);
 
         if (pending !== undefined) {
-            const transaction = this.database.transaction(
-                PENDING_STORE,
-                "readwrite",
-            );
-            transaction.objectStore(PENDING_STORE).put(update(pending));
-            await transactionDone(transaction);
+            await this.put(PENDING_STORE, update(pending));
         }
     }
 
-    private async pending(
-        operationId: string,
-    ): Promise<PendingCreate | undefined> {
-        const transaction = this.database.transaction(
-            PENDING_STORE,
-            "readonly",
-        );
-        const pending = await requestValue<PendingCreate | undefined>(
-            transaction.objectStore(PENDING_STORE).get(operationId),
+    private async value<T>(
+        storeName: string,
+        key: IDBValidKey,
+    ): Promise<T | undefined> {
+        const transaction = this.database.transaction(storeName, "readonly");
+        const value = await requestValue<T | undefined>(
+            transaction.objectStore(storeName).get(key),
         );
         await transactionDone(transaction);
-        return pending;
+        return value;
+    }
+
+    private async values<T>(storeName: string): Promise<T[]> {
+        const transaction = this.database.transaction(storeName, "readonly");
+        const values = await requestValue<T[]>(
+            transaction.objectStore(storeName).getAll(),
+        );
+        await transactionDone(transaction);
+        return values;
+    }
+
+    private async put(storeName: string, value: unknown): Promise<void> {
+        const transaction = this.database.transaction(storeName, "readwrite");
+        transaction.objectStore(storeName).put(value);
+        await transactionDone(transaction);
+    }
+
+    private async delete(storeName: string, key: IDBValidKey): Promise<void> {
+        const transaction = this.database.transaction(storeName, "readwrite");
+        transaction.objectStore(storeName).delete(key);
+        await transactionDone(transaction);
     }
 }
 
@@ -214,6 +421,21 @@ function openDatabase(databaseName: string): Promise<IDBDatabase> {
                 database.createObjectStore(ARTIFACT_STORE, {
                     keyPath: "artifactId",
                 });
+            }
+            if (!database.objectStoreNames.contains(REPLICA_STORE)) {
+                database.createObjectStore(REPLICA_STORE, { keyPath: "path" });
+            }
+            if (!database.objectStoreNames.contains(APPLY_STORE)) {
+                const apply = database.createObjectStore(APPLY_STORE, {
+                    keyPath: "applyId",
+                });
+                apply.createIndex("path", "path", { unique: false });
+            }
+            if (!database.objectStoreNames.contains(CONFLICT_STORE)) {
+                const conflict = database.createObjectStore(CONFLICT_STORE, {
+                    keyPath: "conflictId",
+                });
+                conflict.createIndex("path", "path", { unique: false });
             }
         };
         request.onsuccess = (): void => resolve(request.result);

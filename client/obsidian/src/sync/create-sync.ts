@@ -1,22 +1,38 @@
 import { contentHash } from "../core/content-hash";
 import { isSyncPath } from "../core/sync-path";
-import { ClientStore, type PendingCreate } from "../storage/client-store";
-import { ServerClient } from "../transport/server-client";
+import {
+    ClientStore,
+    type PendingCreate,
+    VaultMismatchError,
+} from "../storage/client-store";
+import { RemoteApply, type LocalVault } from "./remote-apply";
+import type { SyncTransport } from "../transport/server-client";
 
 export interface SyncSummary {
     readonly committed: number;
     readonly conflicted: number;
     readonly offline: boolean;
+    readonly vaultMismatch: boolean;
+}
+
+interface PullSummary {
+    readonly conflicted: number;
+    readonly unavailable: boolean;
 }
 
 export class CreateSync {
     private activeSync: Promise<SyncSummary> | undefined;
 
+    private readonly remoteApply: RemoteApply;
+
     public constructor(
         private readonly store: ClientStore,
-        private readonly serverClient: ServerClient,
+        private readonly serverClient: SyncTransport,
+        private readonly localVault: LocalVault,
         private readonly serverUrl: () => string,
-    ) {}
+    ) {
+        this.remoteApply = new RemoteApply(store, serverClient, localVault);
+    }
 
     public async captureCreate(
         path: string,
@@ -26,8 +42,20 @@ export class CreateSync {
             return undefined;
         }
 
-        const existing = await this.store.findActiveCreate(path);
+        const hash = await contentHash(content);
+        if (await this.store.hasPreparedRemoteApply(path, hash)) {
+            return undefined;
+        }
+        if (await this.store.hasConflict(path)) {
+            return undefined;
+        }
 
+        const replica = await this.store.replica(path);
+        if (replica?.state === "PRESENT" && replica.contentHash === hash) {
+            return undefined;
+        }
+
+        const existing = await this.store.findActiveCreate(path);
         if (existing !== undefined) {
             return existing;
         }
@@ -38,7 +66,7 @@ export class CreateSync {
             clientId,
             type: "CREATE",
             path,
-            contentHash: await contentHash(content),
+            contentHash: hash,
             size: content.byteLength,
             artifactId: `artifact-${crypto.randomUUID()}`,
             createdAt: new Date().toISOString(),
@@ -63,9 +91,131 @@ export class CreateSync {
         const serverUrl = this.serverUrl();
 
         if (serverUrl.length === 0) {
-            return { committed: 0, conflicted: 0, offline: true };
+            return unavailable(0, 0);
         }
 
+        try {
+            await this.remoteApply.recoverInterruptedApplies();
+
+            const beforePush = await this.pull(serverUrl);
+            if (beforePush.unavailable) {
+                return unavailable(0, beforePush.conflicted);
+            }
+
+            const pushed = await this.push(serverUrl);
+            if (pushed.offline) {
+                return unavailable(
+                    pushed.committed,
+                    beforePush.conflicted + pushed.conflicted,
+                );
+            }
+
+            const afterPush = await this.pull(serverUrl);
+            if (afterPush.unavailable) {
+                return unavailable(
+                    pushed.committed,
+                    beforePush.conflicted +
+                        pushed.conflicted +
+                        afterPush.conflicted,
+                );
+            }
+
+            return {
+                committed: pushed.committed,
+                conflicted:
+                    beforePush.conflicted +
+                    pushed.conflicted +
+                    afterPush.conflicted,
+                offline: false,
+                vaultMismatch: false,
+            };
+        } catch (error: unknown) {
+            if (error instanceof VaultMismatchError) {
+                return {
+                    committed: 0,
+                    conflicted: 0,
+                    offline: false,
+                    vaultMismatch: true,
+                };
+            }
+
+            console.warn("VaultDatum synchronization failed", error);
+            return unavailable(0, 0);
+        }
+    }
+
+    private async pull(serverUrl: string): Promise<PullSummary> {
+        const vault = await this.serverClient.readVault(serverUrl);
+
+        if (vault.kind !== "OK") {
+            return { conflicted: 0, unavailable: true };
+        }
+
+        let state = await this.store.confirmVault(vault.value.vaultId);
+        let conflicted = 0;
+
+        while (state.serverCursor < vault.value.currentRevision) {
+            const page = await this.serverClient.listChanges(
+                serverUrl,
+                state.serverCursor,
+                500,
+            );
+
+            if (page.kind !== "OK") {
+                return { conflicted, unavailable: true };
+            }
+            if (page.value.vaultId !== vault.value.vaultId) {
+                throw new Error(
+                    "Server changed Vault identity during synchronization",
+                );
+            }
+            if (
+                page.value.changes.length === 0 ||
+                page.value.toInclusive < state.serverCursor
+            ) {
+                throw new Error("Server returned an incomplete change page");
+            }
+
+            let expectedRevision = state.serverCursor + 1;
+            for (const change of page.value.changes) {
+                if (change.revision !== expectedRevision) {
+                    throw new Error(
+                        "Server change revisions are not contiguous",
+                    );
+                }
+
+                const integrated = await this.remoteApply.integrateChange(
+                    serverUrl,
+                    change,
+                );
+                conflicted += integrated.conflicted;
+                expectedRevision += 1;
+            }
+            if (page.value.toInclusive !== expectedRevision - 1) {
+                throw new Error(
+                    "Server change page cursor does not match its changes",
+                );
+            }
+
+            await this.store.advanceCursor(
+                vault.value.vaultId,
+                page.value.toInclusive,
+            );
+            state = await this.store.syncState();
+
+            if (!page.value.hasMore) {
+                break;
+            }
+        }
+
+        return { conflicted, unavailable: false };
+    }
+
+    private async push(serverUrl: string): Promise<{
+        readonly committed: number;
+        readonly conflicted: number;
+        readonly offline: boolean;
+    }> {
         let committed = 0;
         let conflicted = 0;
         const pendingCreates = await this.store.pendingCreates();
@@ -96,10 +246,7 @@ export class CreateSync {
             }
 
             if (result.kind === "COMMITTED") {
-                await this.store.removeCommitted(
-                    pending.operationId,
-                    pending.artifactId,
-                );
+                await this.store.markCommitted(pending.operationId);
                 committed += 1;
                 continue;
             }
@@ -114,4 +261,13 @@ export class CreateSync {
 
         return { committed, conflicted, offline: false };
     }
+}
+
+function unavailable(committed: number, conflicted: number): SyncSummary {
+    return {
+        committed,
+        conflicted,
+        offline: true,
+        vaultMismatch: false,
+    };
 }

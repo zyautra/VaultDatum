@@ -5,10 +5,12 @@ import {
     PluginSettingTab,
     Setting,
     TFile,
+    TFolder,
 } from "obsidian";
 
 import { ClientStore } from "./storage/client-store";
 import { CreateSync, type SyncSummary } from "./sync/create-sync";
+import type { LocalVault } from "./sync/remote-apply";
 import { ServerClient } from "./transport/server-client";
 
 interface VaultDatumSettings {
@@ -33,8 +35,11 @@ export default class VaultDatumPlugin extends Plugin {
     public async onload(): Promise<void> {
         await this.loadSettings();
         this.store = await ClientStore.open(this.syncSettings.databaseName);
-        this.createSync = new CreateSync(this.store, new ServerClient(), () =>
-            this.serverUrl(),
+        this.createSync = new CreateSync(
+            this.store,
+            new ServerClient(),
+            new ObsidianLocalVault(this.app),
+            () => this.serverUrl(),
         );
         this.addSettingTab(new VaultDatumSettingTab(this.app, this));
         this.addCommand({
@@ -130,6 +135,12 @@ export default class VaultDatumPlugin extends Plugin {
     }
 
     private showSyncResult(summary: SyncSummary): void {
+        if (summary.vaultMismatch) {
+            new Notice(
+                "VaultDatum stopped because this local sync state belongs to another server Vault.",
+            );
+            return;
+        }
         if (summary.offline) {
             new Notice(
                 "VaultDatum is offline or no server URL is configured. Pending work is kept locally.",
@@ -157,6 +168,70 @@ export default class VaultDatumPlugin extends Plugin {
 
     private async saveSettings(): Promise<void> {
         await this.saveData(this.syncSettings);
+    }
+}
+
+class ObsidianLocalVault implements LocalVault {
+    public constructor(private readonly app: App) {}
+
+    public async readFile(path: string): Promise<ArrayBuffer | undefined> {
+        const file = this.app.vault.getAbstractFileByPath(path);
+
+        if (!(file instanceof TFile)) {
+            return undefined;
+        }
+
+        return this.app.vault.readBinary(file);
+    }
+
+    public async writeFile(path: string, content: ArrayBuffer): Promise<void> {
+        const existing = this.app.vault.getAbstractFileByPath(path);
+
+        if (existing instanceof TFile) {
+            await this.app.vault.modifyBinary(existing, content);
+            return;
+        }
+        if (existing !== null) {
+            throw new Error(
+                "Cannot replace a local folder with remote file content",
+            );
+        }
+
+        await this.createParentFolders(path);
+        await this.app.vault.createBinary(path, content);
+    }
+
+    public async removeFile(path: string): Promise<void> {
+        const existing = this.app.vault.getAbstractFileByPath(path);
+
+        if (existing === null) {
+            return;
+        }
+        if (!(existing instanceof TFile)) {
+            throw new Error(
+                "Cannot remove a local folder for a remote file change",
+            );
+        }
+
+        await this.app.vault.delete(existing);
+    }
+
+    private async createParentFolders(path: string): Promise<void> {
+        const segments = path.split("/");
+        let current = "";
+
+        for (const segment of segments.slice(0, -1)) {
+            current = current.length === 0 ? segment : `${current}/${segment}`;
+            const existing = this.app.vault.getAbstractFileByPath(current);
+
+            if (existing === null) {
+                await this.app.vault.createFolder(current);
+                continue;
+            }
+            if (!(existing instanceof TFolder)) {
+                throw new Error("Cannot create a local folder over a file");
+            }
+        }
     }
 }
 
