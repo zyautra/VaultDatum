@@ -268,6 +268,60 @@ async function pullsTheLatestContentAfterAnOwnIntermediateChange(): Promise<void
     store.close();
 }
 
+async function retriesAnInFlightCreateAfterAStoreRestart(): Promise<void> {
+    const path = "notes/offline.md";
+    const content = bytes("Persisted while offline");
+    const contentHashValue = await contentHash(content);
+    const databaseName = `test-offline-retry-${crypto.randomUUID()}`;
+    const firstStore = await ClientStore.open(databaseName);
+    const vault = new MemoryVault();
+    await vault.writeFile(path, content);
+    const transport = new RetryingTransport(
+        path,
+        contentHashValue,
+        content.byteLength,
+    );
+    const firstSync = new CreateSync(
+        firstStore,
+        transport,
+        vault,
+        () => "https://vaultdatum.test",
+    );
+
+    const captured = await firstSync.captureCreate(path, content);
+    const firstSummary = await firstSync.sync();
+
+    assert.equal(captured?.type, "CREATE");
+    assert.equal(firstSummary.offline, true);
+    assert.equal(
+        (await firstStore.operation(captured?.operationId ?? ""))?.status,
+        "IN_FLIGHT",
+    );
+    firstStore.close();
+
+    const restartedStore = await ClientStore.open(databaseName);
+    const restartedSync = new CreateSync(
+        restartedStore,
+        transport,
+        vault,
+        () => "https://vaultdatum.test",
+    );
+    const restartedSummary = await restartedSync.sync();
+
+    assert.deepEqual(restartedSummary, {
+        committed: 1,
+        conflicted: 0,
+        offline: false,
+        vaultMismatch: false,
+    });
+    assert.equal(
+        await restartedStore.operation(captured?.operationId ?? ""),
+        undefined,
+    );
+    assert.equal((await restartedStore.syncState()).serverCursor, 1);
+    restartedStore.close();
+}
+
 class DownloadTransport implements ContentTransport {
     public constructor(private readonly content: ArrayBuffer) {}
 
@@ -427,6 +481,100 @@ class HistoryTransport extends DownloadTransport implements SyncTransport {
     }
 }
 
+class RetryingTransport extends NoopTransport {
+    private available = false;
+
+    private committed = false;
+
+    private change: RemoteChange | undefined;
+
+    public constructor(
+        private readonly path: string,
+        private readonly contentHashValue: string,
+        private readonly size: number,
+    ) {
+        super();
+    }
+
+    public override async readVault(
+        serverUrl: string,
+    ): Promise<ReadResult<RemoteVaultInfo>> {
+        void serverUrl;
+        return {
+            kind: "OK",
+            value: {
+                vaultId: "V-offline-retry",
+                currentRevision: this.committed ? 1 : 0,
+                oldestRetainedRevision: 0,
+                protocolVersion: 1,
+                hashAlgorithm: "SHA-256",
+            },
+        };
+    }
+
+    public override async listChanges(
+        serverUrl: string,
+        after: number,
+        limit: number,
+    ): Promise<ReadResult<RemoteChangePage>> {
+        void serverUrl;
+        void limit;
+        return {
+            kind: "OK",
+            value: {
+                vaultId: "V-offline-retry",
+                fromExclusive: after,
+                toInclusive: this.committed ? 1 : after,
+                currentRevision: this.committed ? 1 : 0,
+                hasMore: false,
+                changes:
+                    this.change === undefined || after >= this.change.revision
+                        ? []
+                        : [this.change],
+            },
+        };
+    }
+
+    public override async submitCreate(
+        serverUrl: string,
+        pending: PendingCreate,
+        content: Blob,
+    ): Promise<SubmitOperationResult> {
+        void serverUrl;
+        void content;
+        if (!this.available) {
+            this.available = true;
+            return { kind: "UNAVAILABLE" };
+        }
+
+        this.committed = true;
+        this.change = {
+            revision: 1,
+            type: "CREATE",
+            operationId: pending.operationId,
+            actor: { type: "CLIENT", clientId: pending.clientId },
+            effects: [
+                {
+                    path: this.path,
+                    entryType: "FILE",
+                    state: "PRESENT",
+                    contentHash: this.contentHashValue,
+                    size: this.size,
+                },
+            ],
+        };
+        return {
+            kind: "COMMITTED",
+            result: {
+                operationId: pending.operationId,
+                status: "COMMITTED",
+                resultRevision: 1,
+                replayed: false,
+            },
+        };
+    }
+}
+
 class MemoryVault implements LocalVault {
     private readonly files = new Map<string, ArrayBuffer>();
 
@@ -480,3 +628,4 @@ await integratesAnOwnChangeAfterTheOperationResponseWasLost();
 await appliesARemoteDeleteToAMatchingReplica();
 await queuesModifyThenDeleteAgainstTheSameReplicaBase();
 await pullsTheLatestContentAfterAnOwnIntermediateChange();
+await retriesAnInFlightCreateAfterAStoreRestart();
