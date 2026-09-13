@@ -27,6 +27,7 @@ class ModifyAndDeleteOperationResourceTest {
 
     @Test
     void modifiesAndDeletesAFileWithPresentBaseConditions() throws IOException {
+        long initialStagingFiles = stagingFileCount();
         String path = "mutations/" + UUID.randomUUID() + ".md";
         byte[] initial = "Initial content".getBytes(StandardCharsets.UTF_8);
         String initialHash = ContentHash.calculate(initial);
@@ -39,9 +40,8 @@ class ModifyAndDeleteOperationResourceTest {
         byte[] modified = "Modified content".getBytes(StandardCharsets.UTF_8);
         String modifiedHash = ContentHash.calculate(modified);
         String modifyOperationId = "OP-" + UUID.randomUUID();
-        int modifiedRevision = postContent(
-                modifyRequest(modifyOperationId, path, createdRevision, initialHash, modified),
-                modified)
+        String modifyRequest = modifyRequest(modifyOperationId, path, createdRevision, initialHash, modified);
+        int modifiedRevision = postContent(modifyRequest, modified)
                 .then()
                 .statusCode(200)
                 .body("resultRevision", greaterThan(createdRevision))
@@ -50,6 +50,13 @@ class ModifyAndDeleteOperationResourceTest {
                 .path("resultRevision");
 
         assertEquals("Modified content", Files.readString(dataDirectories.vault().resolve(path)));
+
+        postContent(modifyRequest, modified)
+                .then()
+                .statusCode(200)
+                .body("resultRevision", is(modifiedRevision))
+                .body("replayed", is(true));
+        assertEquals(initialStagingFiles, stagingFileCount());
 
         postContent(
                 modifyRequest("OP-" + UUID.randomUUID(), path, createdRevision, initialHash, initial),
@@ -99,6 +106,12 @@ class ModifyAndDeleteOperationResourceTest {
                         .build())
                 .multiPart("content", "content.bin", content, "application/octet-stream")
                 .when().post("/api/v1/operations");
+    }
+
+    private long stagingFileCount() throws IOException {
+        try (var files = Files.list(dataDirectories.staging())) {
+            return files.count();
+        }
     }
 
     private static String createRequest(String operationId, String path, byte[] content) {

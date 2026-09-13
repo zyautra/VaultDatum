@@ -81,11 +81,15 @@ public final class OperationResource {
 
             if ("CREATE".equals(request.type())) {
                 CreateOperation operation = createOperation(request, actualContent);
-                return Response.ok(response(createCoordinator.commit(operation, stagedContent))).build();
+                CreateOperationResult result = createCoordinator.commit(operation, stagedContent);
+                discardReplayUpload(result.replayed(), stagedContent);
+                return Response.ok(response(result)).build();
             }
             if ("MODIFY".equals(request.type())) {
                 ModifyOperation operation = modifyOperation(request, actualContent);
-                return Response.ok(response(modifyCoordinator.commit(operation, stagedContent))).build();
+                OperationResult result = modifyCoordinator.commit(operation, stagedContent);
+                discardReplayUpload(result.replayed(), stagedContent);
+                return Response.ok(response(result)).build();
             }
 
             return error(Response.Status.BAD_REQUEST.getStatusCode(), "INVALID_REQUEST",
@@ -116,6 +120,12 @@ public final class OperationResource {
             Files.deleteIfExists(content);
         } catch (IOException exception) {
             throw new IllegalStateException("Could not discard uncommitted staged content", exception);
+        }
+    }
+
+    private static void discardReplayUpload(boolean replayed, java.nio.file.Path stagedContent) {
+        if (replayed) {
+            deleteIfPresent(stagedContent);
         }
     }
 

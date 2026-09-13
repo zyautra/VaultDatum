@@ -28,6 +28,7 @@ class OperationResourceTest {
 
     @Test
     void commitsCreatePersistsContentAndReplaysTheSameOperation() throws IOException {
+        long initialStagingFiles = stagingFileCount();
         String operationId = "OP-" + UUID.randomUUID();
         String path = "notes/" + UUID.randomUUID() + ".md";
         byte[] content = "First server note".getBytes(StandardCharsets.UTF_8);
@@ -51,6 +52,7 @@ class OperationResourceTest {
                 .body("operationId", is(operationId))
                 .body("resultRevision", is(revision))
                 .body("replayed", is(true));
+        assertEquals(initialStagingFiles, stagingFileCount());
 
         given()
                 .when().get("/api/v1/vault")
@@ -125,6 +127,12 @@ class OperationResourceTest {
                         .build())
                 .multiPart("content", "content.bin", content, "application/octet-stream")
                 .when().post("/api/v1/operations");
+    }
+
+    private long stagingFileCount() throws IOException {
+        try (var files = Files.list(dataDirectories.staging())) {
+            return files.count();
+        }
     }
 
     private static String createRequest(String operationId, String path, byte[] content) {
