@@ -15,7 +15,11 @@ import {
     type SubmitOperationResult,
     type SyncTransport,
 } from "../transport/server-client";
-import { RemoteApply, type LocalVault } from "./remote-apply";
+import {
+    RemoteApply,
+    type LocalVault,
+    type ManualMergeVersions,
+} from "./remote-apply";
 
 export interface SyncSummary {
     readonly committed: number;
@@ -155,6 +159,25 @@ export class CreateSync {
         );
     }
 
+    public async manualMergeVersions(
+        path: string,
+    ): Promise<ManualMergeVersions> {
+        const serverUrl = this.serverUrl();
+
+        if (serverUrl.length === 0) {
+            throw new Error("A server URL is required to manually merge files");
+        }
+
+        return this.remoteApply.manualMergeVersions(serverUrl, path);
+    }
+
+    public async resolveManualMerge(
+        path: string,
+        mergedContent: ArrayBuffer,
+    ): Promise<boolean> {
+        return this.remoteApply.resolveManualMerge(path, mergedContent);
+    }
+
     private async captureContent(
         path: string,
         content: ArrayBuffer,
@@ -244,6 +267,7 @@ export class CreateSync {
             }
 
             await this.remoteApply.recoverKeepBothResolutions(serverUrl);
+            await this.remoteApply.recoverManualMergeResolutions();
 
             const pushed = await this.push(serverUrl);
             if (pushed.offline) {

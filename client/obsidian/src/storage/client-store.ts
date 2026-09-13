@@ -74,6 +74,13 @@ export interface KeepBothResolution {
     readonly phase: "COPYING" | "APPLYING_SERVER";
 }
 
+export interface ManualMergeResolution {
+    readonly resolutionId: string;
+    readonly path: string;
+    readonly sourceContentHash: string;
+    readonly pending: PendingModify;
+}
+
 export class VaultMismatchError extends Error {
     public constructor(expectedVaultId: string, actualVaultId: string) {
         super(
@@ -97,7 +104,7 @@ interface Artifact {
     readonly content: Blob;
 }
 
-const DATABASE_VERSION = 3;
+const DATABASE_VERSION = 4;
 const METADATA_STORE = "metadata";
 const PENDING_STORE = "pending";
 const ARTIFACT_STORE = "artifact";
@@ -105,6 +112,7 @@ const REPLICA_STORE = "replica";
 const APPLY_STORE = "apply";
 const CONFLICT_STORE = "conflict";
 const KEEP_BOTH_STORE = "keep-both";
+const MANUAL_MERGE_STORE = "manual-merge";
 
 export class ClientStore {
     private constructor(private readonly database: IDBDatabase) {}
@@ -554,6 +562,46 @@ export class ClientStore {
         await transactionDone(transaction);
     }
 
+    public async manualMergeResolutions(): Promise<ManualMergeResolution[]> {
+        return this.values<ManualMergeResolution>(MANUAL_MERGE_STORE);
+    }
+
+    public async beginManualMergeResolution(
+        resolution: ManualMergeResolution,
+        content: Blob,
+    ): Promise<void> {
+        const transaction = this.database.transaction(
+            [MANUAL_MERGE_STORE, ARTIFACT_STORE],
+            "readwrite",
+        );
+        transaction.objectStore(ARTIFACT_STORE).put({
+            artifactId: resolution.pending.artifactId,
+            content,
+        } satisfies Artifact);
+        transaction.objectStore(MANUAL_MERGE_STORE).put(resolution);
+        await transactionDone(transaction);
+    }
+
+    public async completeManualMergeResolution(
+        resolution: ManualMergeResolution,
+    ): Promise<void> {
+        const replaced = await this.pendingForPath(resolution.path);
+        const conflicts = await this.conflictsForPath(resolution.path);
+        const transaction = this.database.transaction(
+            [MANUAL_MERGE_STORE, CONFLICT_STORE, PENDING_STORE, ARTIFACT_STORE],
+            "readwrite",
+        );
+        this.discardPendingInTransaction(transaction, replaced);
+        for (const conflict of conflicts) {
+            transaction.objectStore(CONFLICT_STORE).delete(conflict.conflictId);
+        }
+        transaction.objectStore(PENDING_STORE).put(resolution.pending);
+        transaction
+            .objectStore(MANUAL_MERGE_STORE)
+            .delete(resolution.resolutionId);
+        await transactionDone(transaction);
+    }
+
     public async recordRemoteConflict(
         conflict: RemoteConflict,
         serverState: ReplicaEntry,
@@ -707,6 +755,11 @@ function openDatabase(databaseName: string): Promise<IDBDatabase> {
             }
             if (!database.objectStoreNames.contains(KEEP_BOTH_STORE)) {
                 database.createObjectStore(KEEP_BOTH_STORE, {
+                    keyPath: "resolutionId",
+                });
+            }
+            if (!database.objectStoreNames.contains(MANUAL_MERGE_STORE)) {
+                database.createObjectStore(MANUAL_MERGE_STORE, {
                     keyPath: "resolutionId",
                 });
             }

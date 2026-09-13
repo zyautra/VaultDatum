@@ -69,7 +69,9 @@ local file into a new DELETE operation against the latest Server file. **Resolve
 conflict: restore Local** creates an explicit restore operation only when the
 latest Server state is a deleted tombstone. **Resolve conflict: keep Both**
 keeps the Server file at its original path and queues this device's content as a
-new file at a user-selected path. Manual merge remains future work.
+new file at a user-selected path. **Resolve conflict: merge manually** shows
+the Server and local Markdown versions, then queues the user-edited result as a
+new MODIFY operation.
 
 ## Update Client Protocol Types
 

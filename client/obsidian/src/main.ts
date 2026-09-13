@@ -86,6 +86,13 @@ export default class VaultDatumPlugin extends Plugin {
                 void this.openKeepBothConflictPicker();
             },
         });
+        this.addCommand({
+            id: "resolve-conflict-manual-merge",
+            name: "Resolve conflict: merge manually",
+            callback: () => {
+                void this.openManualMergeConflictPicker();
+            },
+        });
 
         this.app.workspace.onLayoutReady(() => {
             this.observeVaultChanges();
@@ -459,6 +466,89 @@ export default class VaultDatumPlugin extends Plugin {
         }
     }
 
+    private async openManualMergeConflictPicker(): Promise<void> {
+        const store = this.store;
+
+        if (store === undefined) {
+            return;
+        }
+        const conflicts = (await store.conflicts()).filter((conflict) =>
+            conflict.path.toLowerCase().endsWith(".md"),
+        );
+        if (conflicts.length === 0) {
+            new Notice("VaultDatum has no Markdown conflicts to merge.");
+            return;
+        }
+
+        new ConflictResolutionModal(
+            this.app,
+            conflicts,
+            "Choose a Markdown conflict to merge manually",
+            (conflict) => this.openManualMergeEditor(conflict),
+        ).open();
+    }
+
+    private async openManualMergeEditor(
+        conflict: RemoteConflict,
+    ): Promise<void> {
+        const createSync = this.createSync;
+
+        if (createSync === undefined) {
+            return;
+        }
+
+        try {
+            const versions = await createSync.manualMergeVersions(
+                conflict.path,
+            );
+            new ManualMergeModal(
+                this.app,
+                conflict.path,
+                new TextDecoder().decode(versions.server),
+                new TextDecoder().decode(versions.local),
+                (merged) => this.resolveManualMerge(conflict, merged),
+            ).open();
+        } catch {
+            console.warn("VaultDatum could not open a manual merge");
+            new Notice(
+                "VaultDatum could not load both file versions. The conflict was kept.",
+            );
+        }
+    }
+
+    private async resolveManualMerge(
+        conflict: RemoteConflict,
+        merged: string,
+    ): Promise<boolean> {
+        const createSync = this.createSync;
+
+        if (createSync === undefined) {
+            return false;
+        }
+
+        try {
+            if (
+                await createSync.resolveManualMerge(
+                    conflict.path,
+                    new TextEncoder().encode(merged).buffer,
+                )
+            ) {
+                new Notice(`VaultDatum queued the merged ${conflict.path}.`);
+                void this.syncNow(false);
+                return true;
+            }
+
+            new Notice("VaultDatum could not find that conflict anymore.");
+            return false;
+        } catch {
+            console.warn("VaultDatum could not save a manual merge");
+            new Notice(
+                "VaultDatum could not save the merged file. The conflict was kept.",
+            );
+            return false;
+        }
+    }
+
     private showSyncResult(summary: SyncSummary): void {
         if (summary.vaultMismatch) {
             new Notice(
@@ -633,6 +723,63 @@ class KeepBothDestinationModal extends Modal {
 
     public onClose(): void {
         this.contentEl.empty();
+    }
+}
+
+class ManualMergeModal extends Modal {
+    public constructor(
+        app: App,
+        private readonly path: string,
+        private readonly serverContent: string,
+        private readonly localContent: string,
+        private readonly save: (mergedContent: string) => Promise<boolean>,
+    ) {
+        super(app);
+    }
+
+    public onOpen(): void {
+        this.setTitle(`Merge ${this.path}`);
+        this.contentEl.createEl("p", {
+            text: "Review both versions, then edit the merged result. The Server version stays authoritative until the new change is committed.",
+        });
+        this.readOnlyArea("Server version", this.serverContent);
+        this.readOnlyArea("This device's version", this.localContent);
+        const result = this.editableArea("Merged result", this.localContent);
+        new Setting(this.contentEl)
+            .addButton((button) =>
+                button.setButtonText("Cancel").onClick(() => this.close()),
+            )
+            .addButton((button) =>
+                button
+                    .setButtonText("Save merged result")
+                    .setCta()
+                    .onClick(() => {
+                        void this.save(result.value).then((saved) => {
+                            if (saved) {
+                                this.close();
+                            }
+                        });
+                    }),
+            );
+    }
+
+    public onClose(): void {
+        this.contentEl.empty();
+    }
+
+    private readOnlyArea(label: string, value: string): void {
+        const area = this.contentEl.createEl("textarea", {
+            attr: { "aria-label": label, rows: "10", readonly: "true" },
+        });
+        area.value = value;
+    }
+
+    private editableArea(label: string, value: string): HTMLTextAreaElement {
+        const area = this.contentEl.createEl("textarea", {
+            attr: { "aria-label": label, rows: "12" },
+        });
+        area.value = value;
+        return area;
     }
 }
 

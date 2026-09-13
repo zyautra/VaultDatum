@@ -4,6 +4,7 @@ import {
     type ApplyIntent,
     ClientStore,
     type KeepBothResolution,
+    type ManualMergeResolution,
     type PendingCreate,
     type PendingDelete,
     type PendingModify,
@@ -25,6 +26,11 @@ export interface LocalVault {
 
 export interface RemoteIntegration {
     readonly conflicted: number;
+}
+
+export interface ManualMergeVersions {
+    readonly server: ArrayBuffer;
+    readonly local: ArrayBuffer;
 }
 
 export class RemoteApply {
@@ -178,6 +184,89 @@ export class RemoteApply {
             } catch (error: unknown) {
                 console.warn(
                     "VaultDatum could not resume a keep-both resolution",
+                    error,
+                );
+            }
+        }
+    }
+
+    public async manualMergeVersions(
+        serverUrl: string,
+        path: string,
+    ): Promise<ManualMergeVersions> {
+        if ((await this.store.conflict(path)) === undefined) {
+            throw new Error("The conflict no longer exists");
+        }
+        const serverState = await this.presentServerFile(path);
+        const local = await this.localVault.readFile(path);
+        if (local === undefined) {
+            throw new Error("Manual merging requires a local file");
+        }
+        const downloaded = await this.serverClient.downloadContent(
+            serverUrl,
+            path,
+            serverState.revision,
+            serverState.contentHash,
+        );
+        if (downloaded.kind !== "OK") {
+            throw new Error("Could not download the current Server file");
+        }
+        if (
+            downloaded.value.byteLength !== serverState.size ||
+            (await contentHash(downloaded.value)) !== serverState.contentHash
+        ) {
+            throw new Error("Downloaded Server content is invalid");
+        }
+        return { server: downloaded.value, local };
+    }
+
+    public async resolveManualMerge(
+        path: string,
+        mergedContent: ArrayBuffer,
+    ): Promise<boolean> {
+        if ((await this.store.conflict(path)) === undefined) {
+            return false;
+        }
+        const serverState = await this.presentServerFile(path);
+        const local = await this.localVault.readFile(path);
+        if (local === undefined) {
+            throw new Error("Manual merging requires a local file");
+        }
+
+        const pending: PendingModify = {
+            operationId: `OP-${crypto.randomUUID()}`,
+            clientId: await this.store.clientId(),
+            type: "MODIFY",
+            path,
+            baseRevision: serverState.revision,
+            baseContentHash: serverState.contentHash,
+            contentHash: await contentHash(mergedContent),
+            size: mergedContent.byteLength,
+            artifactId: `artifact-${crypto.randomUUID()}`,
+            createdAt: new Date().toISOString(),
+            status: "READY",
+        };
+        const resolution: ManualMergeResolution = {
+            resolutionId: `manual-merge-${crypto.randomUUID()}`,
+            path,
+            sourceContentHash: await contentHash(local),
+            pending,
+        };
+        await this.store.beginManualMergeResolution(
+            resolution,
+            new Blob([mergedContent]),
+        );
+        await this.continueManualMergeResolution(resolution);
+        return true;
+    }
+
+    public async recoverManualMergeResolutions(): Promise<void> {
+        for (const resolution of await this.store.manualMergeResolutions()) {
+            try {
+                await this.continueManualMergeResolution(resolution);
+            } catch (error: unknown) {
+                console.warn(
+                    "VaultDatum could not resume a manual merge",
                     error,
                 );
             }
@@ -361,6 +450,43 @@ export class RemoteApply {
         return this.resolveUseServer(serverUrl, ready.sourcePath, ready);
     }
 
+    private async continueManualMergeResolution(
+        resolution: ManualMergeResolution,
+    ): Promise<void> {
+        const artifact = await this.store.artifact(
+            resolution.pending.artifactId,
+        );
+        if (artifact === undefined) {
+            throw new Error("The manual merge content is no longer available");
+        }
+        const mergedContent = await artifact.arrayBuffer();
+        if (
+            mergedContent.byteLength !== resolution.pending.size ||
+            (await contentHash(mergedContent)) !==
+                resolution.pending.contentHash
+        ) {
+            throw new Error("The durable manual merge content is invalid");
+        }
+
+        const localContent = await this.localVault.readFile(resolution.path);
+        const localHash =
+            localContent === undefined
+                ? undefined
+                : await contentHash(localContent);
+        if (localHash === resolution.pending.contentHash) {
+            await this.store.completeManualMergeResolution(resolution);
+            return;
+        }
+        if (localHash !== resolution.sourceContentHash) {
+            throw new Error(
+                "The local file changed before the manual merge applied",
+            );
+        }
+
+        await this.localVault.writeFile(resolution.path, mergedContent);
+        await this.store.completeManualMergeResolution(resolution);
+    }
+
     private async integrateEffect(
         serverUrl: string,
         change: RemoteChange,
@@ -510,6 +636,33 @@ export class RemoteApply {
     private async localHash(path: string): Promise<string | undefined> {
         const content = await this.localVault.readFile(path);
         return content === undefined ? undefined : contentHash(content);
+    }
+
+    private async presentServerFile(path: string): Promise<
+        ReplicaEntry & {
+            readonly entryType: "FILE";
+            readonly state: "PRESENT";
+            readonly contentHash: string;
+            readonly size: number;
+        }
+    > {
+        const serverState = await this.store.replica(path);
+        if (
+            serverState === undefined ||
+            serverState.entryType !== "FILE" ||
+            serverState.state !== "PRESENT" ||
+            serverState.contentHash === undefined ||
+            serverState.size === undefined
+        ) {
+            throw new Error("Manual merging requires a present Server file");
+        }
+        return {
+            ...serverState,
+            entryType: "FILE",
+            state: "PRESENT",
+            contentHash: serverState.contentHash,
+            size: serverState.size,
+        };
     }
 }
 

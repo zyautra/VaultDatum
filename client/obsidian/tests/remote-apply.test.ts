@@ -6,6 +6,7 @@ import { contentHash } from "../src/core/content-hash";
 import {
     ClientStore,
     type KeepBothResolution,
+    type ManualMergeResolution,
     type PendingCreate,
     type PendingDelete,
     type PendingModify,
@@ -774,6 +775,131 @@ async function resumesAnInterruptedKeepBothResolution(): Promise<void> {
     store.close();
 }
 
+async function manuallyMergesAMarkdownConflict(): Promise<void> {
+    const path = "notes/manual-merge.md";
+    const localContent = bytes("Local version");
+    const remoteContent = bytes("Server version");
+    const mergedContent = bytes("Merged version");
+    const localHash = await contentHash(localContent);
+    const remoteHash = await contentHash(remoteContent);
+    const source = await pendingModify(path, localContent, "C-local-client");
+    const store = await ClientStore.open(
+        `test-manual-merge-${crypto.randomUUID()}`,
+    );
+    const vault = new MemoryVault();
+    await vault.writeFile(path, localContent);
+    await store.saveContentOperation(source, new Blob([localContent]));
+    const apply = new RemoteApply(
+        store,
+        new DownloadTransport(remoteContent),
+        vault,
+    );
+
+    await apply.integrateChange("https://vaultdatum.test", {
+        revision: 14,
+        type: "MODIFY",
+        operationId: `OP-${crypto.randomUUID()}`,
+        actor: { type: "CLIENT", clientId: "C-remote-client" },
+        effects: [
+            {
+                path,
+                entryType: "FILE",
+                state: "PRESENT",
+                contentHash: remoteHash,
+                size: remoteContent.byteLength,
+            },
+        ],
+    });
+
+    const versions = await apply.manualMergeVersions(
+        "https://vaultdatum.test",
+        path,
+    );
+    const resolved = await apply.resolveManualMerge(path, mergedContent);
+    const pending = await store.pendingForPath(path);
+
+    assert.equal(new TextDecoder().decode(versions.server), "Server version");
+    assert.equal(new TextDecoder().decode(versions.local), "Local version");
+    assert.equal(resolved, true);
+    assert.equal(await vault.hash(path), await contentHash(mergedContent));
+    assert.equal(await store.hasConflict(path), false);
+    assert.equal(await store.operation(source.operationId), undefined);
+    assert.equal(await store.artifact(source.artifactId), undefined);
+    assert.equal((await store.manualMergeResolutions()).length, 0);
+    assert.equal(pending?.type, "MODIFY");
+    if (pending?.type !== "MODIFY") {
+        throw new Error("Expected a pending MODIFY operation for the merge");
+    }
+    assert.equal(pending.baseRevision, 14);
+    assert.equal(pending.baseContentHash, remoteHash);
+    assert.equal(pending.contentHash, await contentHash(mergedContent));
+    assert.notEqual(localHash, pending.contentHash);
+    store.close();
+}
+
+async function resumesAnInterruptedManualMerge(): Promise<void> {
+    const path = "notes/manual-merge-recovery.md";
+    const localContent = bytes("Local before merge");
+    const remoteContent = bytes("Server before merge");
+    const mergedContent = bytes("Durable merged result");
+    const remoteHash = await contentHash(remoteContent);
+    const source = await pendingModify(path, localContent, "C-local-client");
+    const pending = await pendingModify(path, mergedContent, "C-local-client");
+    const resolution: ManualMergeResolution = {
+        resolutionId: `manual-merge-${crypto.randomUUID()}`,
+        path,
+        sourceContentHash: await contentHash(localContent),
+        pending: {
+            ...pending,
+            baseRevision: 15,
+            baseContentHash: remoteHash,
+        },
+    };
+    const store = await ClientStore.open(
+        `test-manual-merge-recovery-${crypto.randomUUID()}`,
+    );
+    const vault = new MemoryVault();
+    await vault.writeFile(path, localContent);
+    await store.saveContentOperation(source, new Blob([localContent]));
+    const apply = new RemoteApply(
+        store,
+        new DownloadTransport(remoteContent),
+        vault,
+    );
+
+    await apply.integrateChange("https://vaultdatum.test", {
+        revision: 15,
+        type: "MODIFY",
+        operationId: `OP-${crypto.randomUUID()}`,
+        actor: { type: "CLIENT", clientId: "C-remote-client" },
+        effects: [
+            {
+                path,
+                entryType: "FILE",
+                state: "PRESENT",
+                contentHash: remoteHash,
+                size: remoteContent.byteLength,
+            },
+        ],
+    });
+    await store.beginManualMergeResolution(
+        resolution,
+        new Blob([mergedContent]),
+    );
+
+    await apply.recoverManualMergeResolutions();
+
+    assert.equal(await vault.hash(path), await contentHash(mergedContent));
+    assert.equal(await store.hasConflict(path), false);
+    assert.equal(await store.operation(source.operationId), undefined);
+    assert.equal((await store.manualMergeResolutions()).length, 0);
+    assert.equal(
+        (await store.pendingForPath(path))?.operationId,
+        resolution.pending.operationId,
+    );
+    store.close();
+}
+
 class DownloadTransport implements ContentTransport {
     public constructor(private readonly content: ArrayBuffer) {}
 
@@ -1093,6 +1219,26 @@ async function pendingCreate(
     };
 }
 
+async function pendingModify(
+    path: string,
+    content: ArrayBuffer,
+    clientId: string,
+): Promise<PendingModify> {
+    return {
+        operationId: `OP-${crypto.randomUUID()}`,
+        clientId,
+        type: "MODIFY",
+        path,
+        baseRevision: 1,
+        baseContentHash: await contentHash(bytes("Initial server content")),
+        contentHash: await contentHash(content),
+        size: content.byteLength,
+        artifactId: `artifact-${crypto.randomUUID()}`,
+        createdAt: new Date().toISOString(),
+        status: "READY",
+    };
+}
+
 await appliesARemoteCreateToAnEmptyVault();
 await preservesAnExistingLocalFileAsAConflict();
 await integratesAnOwnChangeAfterTheOperationResponseWasLost();
@@ -1107,3 +1253,5 @@ await explicitlyResolvesAConflictByKeepingTheLocalDeletion();
 await explicitlyResolvesAConflictByRestoringLocalContent();
 await explicitlyResolvesACreateConflictByKeepingBothFiles();
 await resumesAnInterruptedKeepBothResolution();
+await manuallyMergesAMarkdownConflict();
+await resumesAnInterruptedManualMerge();
