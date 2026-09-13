@@ -1,3 +1,14 @@
+vaultdatum:
+  data-root: ${VAULTDATUM_DATA_ROOT:/data}
+
+"%dev":
+  vaultdatum:
+    data-root: ${VAULTDATUM_DATA_ROOT:target/vaultdatum-data}
+
+"%test":
+  vaultdatum:
+    data-root: ${VAULTDATUM_DATA_ROOT:target/vaultdatum-test-data}
+
 quarkus:
   application:
     name: vaultdatum-server
@@ -7,10 +18,12 @@ quarkus:
     db-kind: other
     jdbc:
       driver: org.sqlite.JDBC
-      url: ${VAULTDATUM_DATABASE_URL:jdbc:sqlite:vaultdatum.db}
+      url: "jdbc:sqlite:file:${vaultdatum.data-root}/state/sync.db?journal_mode=WAL&synchronous=FULL&foreign_keys=on"
+      max-size: 4
     devservices:
       enabled: false
     health:
       enabled: false
   flyway:
     migrate-at-start: false
+    table: schema_migrations

@@ -67,9 +67,11 @@ docker compose up -d --build
 curl --fail http://127.0.0.1:8080/health
 ```
 
-The named `vaultdatum-data` volume persists server data, including the SQLite
-database. Back up this volume before an upgrade; do not use `docker compose down
--v` in production.
+The named `vaultdatum-data` volume persists the server data root, including the
+authoritative Vault, SQLite metadata, staging, and recovery directories. Back
+up this volume before an upgrade; do not use `docker compose down -v` in
+production. For Docker, Kubernetes, or another OCI platform, mount persistent
+storage at `/data`.
 
 ## Layout
 
