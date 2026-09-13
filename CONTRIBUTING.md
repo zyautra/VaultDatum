@@ -30,6 +30,8 @@ For a suspected security vulnerability, do not open a public issue. Contact
 
 ## Pull Requests
 
+- Create a focused `feature/*` branch from `main` for new functionality, and
+  merge it only after the relevant checks pass.
 - Keep each pull request focused on one problem.
 - Add or update tests for behavior changes, particularly synchronization,
   persistence, conflict, and recovery behavior.
@@ -39,7 +41,9 @@ For a suspected security vulnerability, do not open a public issue. Contact
 
   ```bash
   ./gradlew test
+  npm --prefix protocol ci
   npm --prefix client/obsidian install
+  npm --prefix client/obsidian run protocol:check
   npm --prefix client/obsidian run check
   npm --prefix client/obsidian run lint
   npm --prefix client/obsidian run format:check

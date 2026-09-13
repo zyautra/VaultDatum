@@ -1,0 +1,13 @@
+{
+  "name": "vaultdatum-protocol-tools",
+  "version": "0.1.0",
+  "private": true,
+  "description": "OpenAPI type-generation tools for VaultDatum",
+  "scripts": {
+    "generate": "openapi-typescript openapi.yaml -o ../client/obsidian/src/transport/generated/protocol.ts"
+  },
+  "devDependencies": {
+    "openapi-typescript": "7.13.0",
+    "typescript": "5.9.3"
+  }
+}

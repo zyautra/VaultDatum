@@ -4,8 +4,9 @@
 **/out/
 **/target/
 
-# Obsidian client dependencies and generated artifacts
+# Node dependencies and generated artifacts
 client/obsidian/node_modules/
+protocol/node_modules/
 client/obsidian/main.js
 client/obsidian/main.js.map
 client/obsidian/data.json

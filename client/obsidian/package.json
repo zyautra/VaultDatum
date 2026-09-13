@@ -11,6 +11,8 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "lint": "eslint src",
+    "protocol:check": "npm run protocol:generate && git diff --exit-code -- src/transport/generated/protocol.ts",
+    "protocol:generate": "npm --prefix ../../protocol run generate && prettier --write src/transport/generated/protocol.ts",
     "test": "npm run check"
   },
   "devDependencies": {

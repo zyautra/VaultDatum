@@ -15,7 +15,9 @@ required.
 
 ```bash
 ./gradlew test
+npm --prefix protocol ci
 npm --prefix client/obsidian install
+npm --prefix client/obsidian run protocol:check
 npm --prefix client/obsidian run check
 npm --prefix client/obsidian run lint
 npm --prefix client/obsidian run format:check
@@ -29,6 +31,15 @@ npm --prefix client/obsidian run build
 ```
 
 The initial health endpoint is available at `GET /health` on port 8080.
+
+## Update Client Protocol Types
+
+The OpenAPI document is the wire-contract source of truth. Regenerate the
+checked-in TypeScript types after changing it:
+
+```bash
+npm --prefix client/obsidian run protocol:generate
+```
 
 ## Build the Native OCI Image
 
