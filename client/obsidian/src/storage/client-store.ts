@@ -374,8 +374,37 @@ export class ClientStore {
     }
 
     public async hasConflict(path: string): Promise<boolean> {
-        const conflicts = await this.values<RemoteConflict>(CONFLICT_STORE);
-        return conflicts.some((conflict) => conflict.path === path);
+        return (await this.conflict(path)) !== undefined;
+    }
+
+    public async conflicts(): Promise<RemoteConflict[]> {
+        return (await this.values<RemoteConflict>(CONFLICT_STORE)).sort(
+            (left, right) => right.revision - left.revision,
+        );
+    }
+
+    public async conflict(path: string): Promise<RemoteConflict | undefined> {
+        return (await this.conflicts()).find(
+            (conflict) => conflict.path === path,
+        );
+    }
+
+    public async clearConflicts(path: string): Promise<void> {
+        const conflicts = (await this.conflicts()).filter(
+            (conflict) => conflict.path === path,
+        );
+        if (conflicts.length === 0) {
+            return;
+        }
+
+        const transaction = this.database.transaction(
+            CONFLICT_STORE,
+            "readwrite",
+        );
+        for (const conflict of conflicts) {
+            transaction.objectStore(CONFLICT_STORE).delete(conflict.conflictId);
+        }
+        await transactionDone(transaction);
     }
 
     public async recordRemoteConflict(

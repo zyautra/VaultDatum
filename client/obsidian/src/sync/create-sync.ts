@@ -112,6 +112,18 @@ export class CreateSync {
         return this.activeSync;
     }
 
+    public async resolveUseServer(path: string): Promise<boolean> {
+        const serverUrl = this.serverUrl();
+
+        if (serverUrl.length === 0) {
+            throw new Error(
+                "A server URL is required to use the server version",
+            );
+        }
+
+        return this.remoteApply.resolveUseServer(serverUrl, path);
+    }
+
     private async captureContent(
         path: string,
         content: ArrayBuffer,

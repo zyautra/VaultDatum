@@ -69,6 +69,39 @@ export class RemoteApply {
         return { conflicted };
     }
 
+    public async resolveUseServer(
+        serverUrl: string,
+        path: string,
+    ): Promise<boolean> {
+        if ((await this.store.conflict(path)) === undefined) {
+            return false;
+        }
+
+        const after = await this.store.replica(path);
+        if (after === undefined) {
+            throw new Error("A conflict has no authoritative replica state");
+        }
+
+        const actual = await this.localHash(path);
+        const applied = await this.apply(
+            serverUrl,
+            path,
+            localState(path, actual, after.revision),
+            after,
+            actual,
+        );
+        if (applied) {
+            return false;
+        }
+
+        const pending = await this.store.pendingForPath(path);
+        if (pending !== undefined) {
+            await this.store.discardPending(pending.operationId);
+        }
+        await this.store.clearConflicts(path);
+        return true;
+    }
+
     private async integrateEffect(
         serverUrl: string,
         change: RemoteChange,
@@ -264,6 +297,29 @@ function matches(
     }
 
     return expected.entryType === "FILE" && expected.contentHash === actualHash;
+}
+
+function localState(
+    path: string,
+    contentHashValue: string | undefined,
+    revision: number,
+): ReplicaEntry {
+    if (contentHashValue === undefined) {
+        return {
+            path,
+            entryType: "FILE",
+            state: "DELETED",
+            revision,
+        };
+    }
+
+    return {
+        path,
+        entryType: "FILE",
+        state: "PRESENT",
+        revision,
+        contentHash: contentHashValue,
+    };
 }
 
 function isOwnChange(

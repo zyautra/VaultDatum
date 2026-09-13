@@ -1,5 +1,6 @@
 import {
     App,
+    FuzzySuggestModal,
     Notice,
     Plugin,
     PluginSettingTab,
@@ -8,7 +9,7 @@ import {
     TFolder,
 } from "obsidian";
 
-import { ClientStore } from "./storage/client-store";
+import { ClientStore, type RemoteConflict } from "./storage/client-store";
 import { CreateSync, type SyncSummary } from "./sync/create-sync";
 import type { LocalVault } from "./sync/remote-apply";
 import { ServerClient } from "./transport/server-client";
@@ -47,6 +48,13 @@ export default class VaultDatumPlugin extends Plugin {
             name: "Sync now",
             callback: () => {
                 void this.syncNow(true);
+            },
+        });
+        this.addCommand({
+            id: "resolve-conflict-use-server",
+            name: "Resolve conflict: use Server",
+            callback: () => {
+                void this.openUseServerConflictPicker();
             },
         });
 
@@ -176,6 +184,49 @@ export default class VaultDatumPlugin extends Plugin {
         }
     }
 
+    private async openUseServerConflictPicker(): Promise<void> {
+        const store = this.store;
+
+        if (store === undefined) {
+            return;
+        }
+
+        const conflicts = await store.conflicts();
+        if (conflicts.length === 0) {
+            new Notice("VaultDatum has no conflicts to resolve.");
+            return;
+        }
+
+        new UseServerConflictModal(this.app, conflicts, (conflict) =>
+            this.resolveUseServer(conflict),
+        ).open();
+    }
+
+    private async resolveUseServer(conflict: RemoteConflict): Promise<void> {
+        const createSync = this.createSync;
+
+        if (createSync === undefined) {
+            return;
+        }
+
+        try {
+            if (await createSync.resolveUseServer(conflict.path)) {
+                new Notice(
+                    `VaultDatum replaced ${conflict.path} with the Server version.`,
+                );
+                void this.syncNow(false);
+                return;
+            }
+
+            new Notice("VaultDatum could not find that conflict anymore.");
+        } catch {
+            console.warn("VaultDatum could not apply the Server version");
+            new Notice(
+                "VaultDatum could not apply the Server version. The conflict was kept.",
+            );
+        }
+    }
+
     private showSyncResult(summary: SyncSummary): void {
         if (summary.vaultMismatch) {
             new Notice(
@@ -274,6 +325,31 @@ class ObsidianLocalVault implements LocalVault {
                 throw new Error("Cannot create a local folder over a file");
             }
         }
+    }
+}
+
+class UseServerConflictModal extends FuzzySuggestModal<RemoteConflict> {
+    public constructor(
+        app: App,
+        private readonly conflicts: readonly RemoteConflict[],
+        private readonly choose: (conflict: RemoteConflict) => Promise<void>,
+    ) {
+        super(app);
+        this.setPlaceholder(
+            "Choose a conflict to replace with the Server version",
+        );
+    }
+
+    public getItems(): RemoteConflict[] {
+        return [...this.conflicts];
+    }
+
+    public getItemText(conflict: RemoteConflict): string {
+        return `${conflict.path} (${conflict.code})`;
+    }
+
+    public onChooseItem(conflict: RemoteConflict): void {
+        void this.choose(conflict);
     }
 }
 

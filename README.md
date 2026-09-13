@@ -60,8 +60,10 @@ asking the server for content that is no longer current. Existing divergent
 local content becomes a conflict; it is never overwritten.
 
 This slice does not yet import an existing Vault, synchronize rename or move
-operations, restore a locally recreated tombstoned path, or offer a
-conflict-resolution UI.
+operations, or restore a locally recreated tombstoned path. The **Resolve
+conflict: use Server** command lets a user explicitly replace one conflicted
+local file with the latest Server version. Other conflict-resolution choices
+remain future work.
 
 ## Update Client Protocol Types
 

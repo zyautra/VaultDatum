@@ -390,6 +390,70 @@ async function continuesPullingUnrelatedPathsAfterAConflict(): Promise<void> {
     store.close();
 }
 
+async function explicitlyResolvesAConflictByUsingTheServerVersion(): Promise<void> {
+    const path = "notes/resolve.md";
+    const localContent = bytes("Local pending content");
+    const remoteContent = bytes("Server selected content");
+    const localHash = await contentHash(localContent);
+    const remoteHash = await contentHash(remoteContent);
+    const pending: PendingCreate = {
+        operationId: `OP-${crypto.randomUUID()}`,
+        clientId: "C-local-client",
+        type: "CREATE",
+        path,
+        contentHash: localHash,
+        size: localContent.byteLength,
+        artifactId: `artifact-${crypto.randomUUID()}`,
+        createdAt: new Date().toISOString(),
+        status: "READY",
+    };
+    const store = await ClientStore.open(
+        `test-use-server-resolution-${crypto.randomUUID()}`,
+    );
+    const vault = new MemoryVault();
+    await vault.writeFile(path, localContent);
+    await store.saveCreate(pending, new Blob([localContent]));
+    const apply = new RemoteApply(
+        store,
+        new DownloadTransport(remoteContent),
+        vault,
+    );
+
+    const integrated = await apply.integrateChange("https://vaultdatum.test", {
+        revision: 4,
+        type: "CREATE",
+        operationId: `OP-${crypto.randomUUID()}`,
+        actor: { type: "CLIENT", clientId: "C-remote-client" },
+        effects: [
+            {
+                path,
+                entryType: "FILE",
+                state: "PRESENT",
+                contentHash: remoteHash,
+                size: remoteContent.byteLength,
+            },
+        ],
+    });
+
+    assert.equal(integrated.conflicted, 1);
+    assert.equal(
+        (await store.operation(pending.operationId))?.status,
+        "CONFLICT",
+    );
+
+    const resolved = await apply.resolveUseServer(
+        "https://vaultdatum.test",
+        path,
+    );
+
+    assert.equal(resolved, true);
+    assert.equal(await vault.hash(path), remoteHash);
+    assert.equal(await store.hasConflict(path), false);
+    assert.equal(await store.operation(pending.operationId), undefined);
+    assert.equal(await store.artifact(pending.artifactId), undefined);
+    store.close();
+}
+
 class DownloadTransport implements ContentTransport {
     public constructor(private readonly content: ArrayBuffer) {}
 
@@ -698,3 +762,4 @@ await queuesModifyThenDeleteAgainstTheSameReplicaBase();
 await pullsTheLatestContentAfterAnOwnIntermediateChange();
 await retriesAnInFlightCreateAfterAStoreRestart();
 await continuesPullingUnrelatedPathsAfterAConflict();
+await explicitlyResolvesAConflictByUsingTheServerVersion();
