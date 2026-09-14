@@ -6,6 +6,10 @@ import io.quarkus.runtime.annotations.RegisterForReflection;
 import io.vaultdatum.server.sync.BaseStateMismatchException;
 import io.vaultdatum.server.sync.DeleteCoordinator;
 import io.vaultdatum.server.sync.DeleteOperation;
+import io.vaultdatum.server.sync.DirectoryCoordinator;
+import io.vaultdatum.server.sync.DirectoryCreateOperation;
+import io.vaultdatum.server.sync.DirectoryDeleteOperation;
+import io.vaultdatum.server.sync.DirectoryPathChangeOperation;
 import io.vaultdatum.server.sync.OperationIdReuseException;
 import io.vaultdatum.server.sync.OperationResult;
 import io.vaultdatum.server.sync.PathChangeType;
@@ -33,16 +37,20 @@ public final class DeleteOperationResource {
 
     private final PathChangeCoordinator pathChangeCoordinator;
 
+    private final DirectoryCoordinator directoryCoordinator;
+
     private final RevisionNotificationPublisher notificationPublisher;
 
     public DeleteOperationResource(
             ObjectMapper objectMapper,
             DeleteCoordinator deleteCoordinator,
             PathChangeCoordinator pathChangeCoordinator,
+            DirectoryCoordinator directoryCoordinator,
             RevisionNotificationPublisher notificationPublisher) {
         this.objectMapper = objectMapper;
         this.deleteCoordinator = deleteCoordinator;
         this.pathChangeCoordinator = pathChangeCoordinator;
+        this.directoryCoordinator = directoryCoordinator;
         this.notificationPublisher = notificationPublisher;
     }
 
@@ -50,11 +58,19 @@ public final class DeleteOperationResource {
     public Response submitMetadataMutation(String serializedOperation) {
         try {
             MetadataRequest request = parse(serializedOperation);
+            validateEntryType(request);
             OperationResult result = switch (request.type()) {
-                case "DELETE" -> deleteCoordinator.commit(deleteOperation(request));
-                case "RENAME" -> pathChangeCoordinator.commit(pathChangeOperation(request, PathChangeType.RENAME));
-                case "MOVE" -> pathChangeCoordinator.commit(pathChangeOperation(request, PathChangeType.MOVE));
-                default -> throw new IllegalArgumentException("Only DELETE, RENAME, and MOVE metadata operations are supported");
+                case "CREATE" -> directoryCoordinator.create(directoryCreateOperation(request));
+                case "DELETE" -> isDirectory(request)
+                        ? directoryCoordinator.delete(directoryDeleteOperation(request))
+                        : deleteCoordinator.commit(deleteOperation(request));
+                case "RENAME" -> isDirectory(request)
+                        ? directoryCoordinator.changePath(directoryPathChangeOperation(request, PathChangeType.RENAME))
+                        : pathChangeCoordinator.commit(pathChangeOperation(request, PathChangeType.RENAME));
+                case "MOVE" -> isDirectory(request)
+                        ? directoryCoordinator.changePath(directoryPathChangeOperation(request, PathChangeType.MOVE))
+                        : pathChangeCoordinator.commit(pathChangeOperation(request, PathChangeType.MOVE));
+                default -> throw new IllegalArgumentException("Only CREATE, DELETE, RENAME, and MOVE metadata operations are supported");
             };
             if (!result.replayed()) {
                 notificationPublisher.publish(result.resultRevision());
@@ -102,6 +118,56 @@ public final class DeleteOperationResource {
                 new PresentBase(request.base()[0].revision(), request.base()[0].contentHash()));
     }
 
+    private DirectoryCreateOperation directoryCreateOperation(MetadataRequest request) {
+        if (!isDirectory(request) || request.base() == null || request.base().length != 1
+                || !"UNKNOWN".equals(request.base()[0].state())
+                || request.base()[0].revision() != null || request.base()[0].contentHash() != null) {
+            throw new IllegalArgumentException("A directory CREATE requires an UNKNOWN base");
+        }
+        SyncPath path = SyncPath.parse(request.path());
+        validateCommon(request, path, "Directory CREATE");
+        if (!path.value().equals(request.base()[0].path())) {
+            throw new IllegalArgumentException("Directory CREATE metadata is invalid");
+        }
+        return new DirectoryCreateOperation(request.operationId(), request.clientId(), path);
+    }
+
+    private DirectoryDeleteOperation directoryDeleteOperation(MetadataRequest request) {
+        if (!isDirectory(request) || request.base() == null || request.base().length != 1
+                || !"PRESENT".equals(request.base()[0].state())
+                || request.base()[0].revision() == null || request.base()[0].revision() < 1
+                || request.base()[0].contentHash() != null) {
+            throw new IllegalArgumentException("A directory DELETE requires a PRESENT directory base");
+        }
+        SyncPath path = SyncPath.parse(request.path());
+        validateCommon(request, path, "Directory DELETE");
+        if (!path.value().equals(request.base()[0].path())) {
+            throw new IllegalArgumentException("Directory DELETE metadata is invalid");
+        }
+        return new DirectoryDeleteOperation(
+                request.operationId(), request.clientId(), path, request.base()[0].revision());
+    }
+
+    private DirectoryPathChangeOperation directoryPathChangeOperation(MetadataRequest request, PathChangeType type) {
+        if (!isDirectory(request) || request.base() == null || request.base().length != 2
+                || !"PRESENT".equals(request.base()[0].state())
+                || request.base()[0].revision() == null || request.base()[0].revision() < 1
+                || request.base()[0].contentHash() != null
+                || !"UNKNOWN".equals(request.base()[1].state())
+                || request.base()[1].revision() != null || request.base()[1].contentHash() != null) {
+            throw new IllegalArgumentException(type + " directory operation requires PRESENT source and UNKNOWN destination bases");
+        }
+        SyncPath source = SyncPath.parse(request.sourcePath());
+        SyncPath destination = SyncPath.parse(request.destinationPath());
+        validateCommon(request, source, type + " directory");
+        if (source.equals(destination) || !source.value().equals(request.base()[0].path())
+                || !destination.value().equals(request.base()[1].path())) {
+            throw new IllegalArgumentException(type + " directory metadata is invalid");
+        }
+        return new DirectoryPathChangeOperation(
+                request.operationId(), request.clientId(), type, source, destination, request.base()[0].revision());
+    }
+
     private PathChangeOperation pathChangeOperation(MetadataRequest request, PathChangeType type) {
         if (request.base() == null || request.base().length != 2
                 || !"PRESENT".equals(request.base()[0].state())
@@ -125,6 +191,26 @@ public final class DeleteOperationResource {
                 new PresentBase(request.base()[0].revision(), request.base()[0].contentHash()));
     }
 
+    private static boolean isDirectory(MetadataRequest request) {
+        return "DIRECTORY".equals(request.entryType());
+    }
+
+    private static void validateEntryType(MetadataRequest request) {
+        if (request == null) {
+            throw new IllegalArgumentException("Operation metadata is required");
+        }
+        if (request.entryType() != null && !"DIRECTORY".equals(request.entryType())) {
+            throw new IllegalArgumentException("entryType must be DIRECTORY when supplied");
+        }
+    }
+
+    private static void validateCommon(MetadataRequest request, SyncPath path, String operation) {
+        if (request.operationId() == null || request.clientId() == null || request.operationId().isBlank()
+                || request.clientId().isBlank() || path == null) {
+            throw new IllegalArgumentException(operation + " metadata is invalid");
+        }
+    }
+
     private static Response error(Response.Status status, String code, String message) {
         return Response.status(status)
                 .entity(new ProtocolErrorResponse(new ErrorResponse(code, message)))
@@ -136,6 +222,7 @@ public final class DeleteOperationResource {
             String operationId,
             String clientId,
             String type,
+            String entryType,
             String path,
             String sourcePath,
             String destinationPath,

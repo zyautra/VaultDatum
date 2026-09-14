@@ -27,11 +27,21 @@ export interface LocalVaultFile {
 
 export interface LocalVault {
     listFiles(): Promise<readonly LocalVaultFile[]>;
+    listDirectories(): Promise<readonly string[]>;
     fileSize(path: string): Promise<number | undefined>;
     readFile(path: string): Promise<ArrayBuffer | undefined>;
     writeFile(path: string, content: ArrayBuffer): Promise<void>;
     removeFile(path: string): Promise<void>;
+    directoryExists(path: string): Promise<boolean>;
+    directoryIsEmpty(path: string): Promise<boolean>;
+    createDirectory(path: string): Promise<void>;
+    removeDirectory(path: string): Promise<void>;
 }
+
+type LocalEntry =
+    | { readonly entryType: "FILE"; readonly contentHash: string }
+    | { readonly entryType: "DIRECTORY" }
+    | undefined;
 
 export interface RemoteIntegration {
     readonly conflicted: number;
@@ -53,7 +63,7 @@ export class RemoteApply {
         const intents = await this.store.applyIntents();
 
         for (const intent of intents) {
-            const actual = await this.localHash(intent.path);
+            const actual = await this.localEntry(intent.path);
 
             if (matches(intent.after, actual)) {
                 await this.store.completeApply(intent);
@@ -80,7 +90,7 @@ export class RemoteApply {
         const submitted = await this.store.operation(change.operationId);
 
         if (
-            (submitted?.type === "RENAME" || submitted?.type === "MOVE") &&
+            isPathChangeOperation(submitted) &&
             isOwnChange(change, submitted)
         ) {
             return this.integrateOwnRename(change, submitted);
@@ -154,7 +164,7 @@ export class RemoteApply {
             return { conflicted: 1 };
         }
 
-        const actual = await this.localHash(effect.path);
+        const actual = await this.localEntry(effect.path);
         if (matches(after, actual)) {
             await this.store.putReplica(after);
             return { conflicted: 0 };
@@ -231,7 +241,7 @@ export class RemoteApply {
                 conflicted += 1;
                 continue;
             }
-            const actual = await this.localHash(effect.path);
+            const actual = await this.localEntry(effect.path);
             if (!matches(after, actual)) {
                 await this.recordConflict(
                     effect.path,
@@ -273,9 +283,13 @@ export class RemoteApply {
                 (await this.store.hasConflict(effect.path)) ||
                 pending !== undefined ||
                 (await this.localContentExceedsLimit(effect.path)) ||
+                (after.entryType === "DIRECTORY" &&
+                    after.state === "DELETED" &&
+                    (await this.localVault.directoryExists(effect.path)) &&
+                    !(await this.localVault.directoryIsEmpty(effect.path))) ||
                 !matches(
                     await this.store.replica(effect.path),
-                    await this.localHash(effect.path),
+                    await this.localEntry(effect.path),
                 )
             ) {
                 unsafe = true;
@@ -323,7 +337,7 @@ export class RemoteApply {
             throw new Error("A conflict has no authoritative replica state");
         }
 
-        const actual = await this.localHash(path);
+        const actual = await this.localEntry(path);
         const applied = await this.apply(
             serverUrl,
             path,
@@ -682,7 +696,7 @@ export class RemoteApply {
             if (
                 matches(
                     await this.store.replica(ready.sourcePath),
-                    await this.localHash(ready.sourcePath),
+                    await this.localEntry(ready.sourcePath),
                 )
             ) {
                 await this.store.completeKeepBothResolution(ready);
@@ -777,7 +791,7 @@ export class RemoteApply {
         }
 
         const submitted = await this.store.operation(change.operationId);
-        const actual = await this.localHash(effect.path);
+        const actual = await this.localEntry(effect.path);
 
         if (submitted !== undefined && isOwnChange(change, submitted)) {
             if (matches(after, actual)) {
@@ -833,13 +847,9 @@ export class RemoteApply {
         path: string,
         before: ReplicaEntry | undefined,
         after: ReplicaEntry,
-        actualHash: string | undefined,
+        actual: LocalEntry,
     ): Promise<boolean> {
-        if (after.entryType !== "FILE") {
-            await this.recordConflict(path, after, "UNSUPPORTED_REMOTE_ENTRY");
-            return true;
-        }
-        if (matches(after, actualHash)) {
+        if (matches(after, actual)) {
             await this.store.putReplica(after);
             return false;
         }
@@ -851,11 +861,31 @@ export class RemoteApply {
             after,
             phase: "PREPARED",
             artifactId:
-                after.state === "PRESENT"
+                after.entryType === "FILE" && after.state === "PRESENT"
                     ? `apply-${after.revision}:${path}`
                     : undefined,
         };
         await this.store.prepareApply(intent);
+
+        if (after.entryType === "DIRECTORY") {
+            try {
+                if (after.state === "PRESENT") {
+                    await this.localVault.createDirectory(path);
+                } else {
+                    await this.localVault.removeDirectory(path);
+                }
+                await this.store.completeApply(intent);
+                return false;
+            } catch {
+                await this.store.discardApply(intent);
+                await this.recordConflict(
+                    path,
+                    after,
+                    "LOCAL_DIRECTORY_APPLY_FAILED",
+                );
+                return true;
+            }
+        }
 
         if (after.state === "DELETED") {
             await this.localVault.removeFile(path);
@@ -904,6 +934,25 @@ export class RemoteApply {
     private async resumeOrDiscardPreparedApply(
         intent: ApplyIntent,
     ): Promise<void> {
+        if (intent.after.entryType === "DIRECTORY") {
+            try {
+                if (intent.after.state === "PRESENT") {
+                    await this.localVault.createDirectory(intent.path);
+                } else {
+                    await this.localVault.removeDirectory(intent.path);
+                }
+                await this.store.completeApply(intent);
+            } catch {
+                await this.store.discardApply(intent);
+                await this.recordConflict(
+                    intent.path,
+                    intent.after,
+                    "REMOTE_DIRECTORY_APPLY_RECOVERY_REQUIRED",
+                );
+            }
+            return;
+        }
+
         const stagedContent = await this.store.applyContent(intent);
         if (
             stagedContent === undefined ||
@@ -950,6 +999,20 @@ export class RemoteApply {
     private async localHash(path: string): Promise<string | undefined> {
         const content = await this.localVault.readFile(path);
         return content === undefined ? undefined : contentHash(content);
+    }
+
+    private async localEntry(path: string): Promise<LocalEntry> {
+        const content = await this.localVault.readFile(path);
+        if (content !== undefined) {
+            return {
+                entryType: "FILE",
+                contentHash: await contentHash(content),
+            };
+        }
+        if (await this.localVault.directoryExists(path)) {
+            return { entryType: "DIRECTORY" };
+        }
+        return undefined;
     }
 
     private async localContentExceedsLimit(path: string): Promise<boolean> {
@@ -1035,25 +1098,41 @@ function replicaEntry(
 
 function matches(
     expected: ReplicaEntry | undefined,
-    actualHash: string | undefined,
+    actual: LocalEntry,
 ): boolean {
     if (expected === undefined || expected.state === "DELETED") {
-        return actualHash === undefined;
+        return actual === undefined;
     }
 
-    return expected.entryType === "FILE" && expected.contentHash === actualHash;
+    if (expected.entryType === "DIRECTORY") {
+        return actual?.entryType === "DIRECTORY";
+    }
+
+    return (
+        actual?.entryType === "FILE" &&
+        expected.contentHash === actual.contentHash
+    );
 }
 
 function localState(
     path: string,
-    contentHashValue: string | undefined,
+    actual: LocalEntry,
     revision: number,
 ): ReplicaEntry {
-    if (contentHashValue === undefined) {
+    if (actual === undefined) {
         return {
             path,
             entryType: "FILE",
             state: "DELETED",
+            revision,
+        };
+    }
+
+    if (actual.entryType === "DIRECTORY") {
+        return {
+            path,
+            entryType: "DIRECTORY",
+            state: "PRESENT",
             revision,
         };
     }
@@ -1063,7 +1142,7 @@ function localState(
         entryType: "FILE",
         state: "PRESENT",
         revision,
-        contentHash: contentHashValue,
+        contentHash: actual.contentHash,
     };
 }
 
@@ -1075,5 +1154,16 @@ function isOwnChange(
         change.operationId === committed.operationId &&
         change.actor.type === "CLIENT" &&
         change.actor.clientId === committed.clientId
+    );
+}
+
+function isPathChangeOperation(
+    pending: PendingOperation | undefined,
+): pending is PendingOperation {
+    return (
+        pending?.type === "RENAME" ||
+        pending?.type === "MOVE" ||
+        pending?.type === "DIRECTORY_RENAME" ||
+        pending?.type === "DIRECTORY_MOVE"
     );
 }

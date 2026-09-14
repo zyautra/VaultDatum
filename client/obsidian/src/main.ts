@@ -168,24 +168,35 @@ export default class VaultDatumPlugin extends Plugin {
         );
         this.registerEvent(
             this.app.vault.on("delete", (file) => {
-                if (!(file instanceof TFile)) {
-                    return;
-                }
-
-                this.captureQueue = this.captureQueue.then(() =>
-                    this.captureDeletedFile(createSync, file.path),
-                );
+                this.captureQueue = this.captureQueue.then(async () => {
+                    if (file instanceof TFile) {
+                        await this.captureDeletedFile(createSync, file.path);
+                    } else if (file instanceof TFolder) {
+                        await this.captureDeletedDirectory(
+                            createSync,
+                            file.path,
+                        );
+                    }
+                });
             }),
         );
         this.registerEvent(
             this.app.vault.on("rename", (file, oldPath) => {
-                if (!(file instanceof TFile)) {
-                    return;
-                }
-
-                this.captureQueue = this.captureQueue.then(() =>
-                    this.capturePathChange(createSync, oldPath, file.path),
-                );
+                this.captureQueue = this.captureQueue.then(async () => {
+                    if (file instanceof TFile) {
+                        await this.captureFilePathChange(
+                            createSync,
+                            oldPath,
+                            file.path,
+                        );
+                    } else if (file instanceof TFolder) {
+                        await this.captureDirectoryPathChange(
+                            createSync,
+                            oldPath,
+                            file.path,
+                        );
+                    }
+                });
             }),
         );
     }
@@ -239,13 +250,13 @@ export default class VaultDatumPlugin extends Plugin {
         }
     }
 
-    private async capturePathChange(
+    private async captureFilePathChange(
         createSync: CreateSync,
         sourcePath: string,
         destinationPath: string,
     ): Promise<void> {
         try {
-            const pending = await createSync.capturePathChange(
+            const pending = await createSync.captureFilePathChange(
                 sourcePath,
                 destinationPath,
             );
@@ -257,6 +268,46 @@ export default class VaultDatumPlugin extends Plugin {
             console.warn("VaultDatum could not queue a renamed file");
             new Notice(
                 "VaultDatum could not queue a renamed file. The local file was not changed.",
+            );
+        }
+    }
+
+    private async captureDeletedDirectory(
+        createSync: CreateSync,
+        path: string,
+    ): Promise<void> {
+        try {
+            const pending = await createSync.captureDirectoryDelete(path);
+
+            if (pending !== undefined) {
+                void this.syncNow(false);
+            }
+        } catch {
+            console.warn("VaultDatum could not queue a deleted directory");
+            new Notice(
+                "VaultDatum could not queue a deleted directory. The local directory was not restored.",
+            );
+        }
+    }
+
+    private async captureDirectoryPathChange(
+        createSync: CreateSync,
+        sourcePath: string,
+        destinationPath: string,
+    ): Promise<void> {
+        try {
+            const pending = await createSync.captureDirectoryPathChange(
+                sourcePath,
+                destinationPath,
+            );
+
+            if (pending !== undefined) {
+                void this.syncNow(false);
+            }
+        } catch {
+            console.warn("VaultDatum could not queue a renamed directory");
+            new Notice(
+                "VaultDatum could not queue a renamed directory. The local directory was not changed.",
             );
         }
     }
@@ -688,6 +739,52 @@ class ObsidianLocalVault implements LocalVault {
         return this.app.vault
             .getFiles()
             .map((file) => ({ path: file.path, size: file.stat.size }));
+    }
+
+    public async listDirectories(): Promise<readonly string[]> {
+        return this.app.vault
+            .getAllLoadedFiles()
+            .filter((file): file is TFolder => file instanceof TFolder)
+            .map((folder) => folder.path)
+            .filter((path) => path.length > 0);
+    }
+
+    public async directoryIsEmpty(path: string): Promise<boolean> {
+        const directory = this.app.vault.getAbstractFileByPath(path);
+        return directory instanceof TFolder && directory.children.length === 0;
+    }
+
+    public async directoryExists(path: string): Promise<boolean> {
+        return this.app.vault.getAbstractFileByPath(path) instanceof TFolder;
+    }
+
+    public async createDirectory(path: string): Promise<void> {
+        const existing = this.app.vault.getAbstractFileByPath(path);
+
+        if (existing instanceof TFolder) {
+            return;
+        }
+        if (existing !== null) {
+            throw new Error(
+                "Cannot replace a local file with a remote directory",
+            );
+        }
+
+        await this.createParentFolders(path);
+        await this.app.vault.createFolder(path);
+    }
+
+    public async removeDirectory(path: string): Promise<void> {
+        const existing = this.app.vault.getAbstractFileByPath(path);
+
+        if (existing === null) {
+            return;
+        }
+        if (!(existing instanceof TFolder) || existing.children.length > 0) {
+            throw new Error("Cannot remove a non-empty local directory");
+        }
+
+        await this.app.vault.delete(existing);
     }
 
     public async fileSize(path: string): Promise<number | undefined> {

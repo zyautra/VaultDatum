@@ -5,6 +5,10 @@ import type { components } from "./generated/protocol";
 import type {
     PendingCreate,
     PendingDelete,
+    PendingDirectoryCreate,
+    PendingDirectoryDelete,
+    PendingDirectoryMove,
+    PendingDirectoryRename,
     PendingMove,
     PendingModify,
     PendingRename,
@@ -130,6 +134,22 @@ export interface SyncTransport extends ContentTransport {
     submitMove(
         serverUrl: string,
         pending: PendingMove,
+    ): Promise<SubmitOperationResult>;
+    submitDirectoryCreate(
+        serverUrl: string,
+        pending: PendingDirectoryCreate,
+    ): Promise<SubmitOperationResult>;
+    submitDirectoryDelete(
+        serverUrl: string,
+        pending: PendingDirectoryDelete,
+    ): Promise<SubmitOperationResult>;
+    submitDirectoryRename(
+        serverUrl: string,
+        pending: PendingDirectoryRename,
+    ): Promise<SubmitOperationResult>;
+    submitDirectoryMove(
+        serverUrl: string,
+        pending: PendingDirectoryMove,
     ): Promise<SubmitOperationResult>;
 }
 
@@ -315,6 +335,64 @@ export class ServerClient implements SyncTransport {
         return this.submitPathChange(serverUrl, pending);
     }
 
+    public async submitDirectoryCreate(
+        serverUrl: string,
+        pending: PendingDirectoryCreate,
+    ): Promise<SubmitOperationResult> {
+        const metadata = {
+            operationId: pending.operationId,
+            clientId: pending.clientId,
+            type: "CREATE" as const,
+            entryType: "DIRECTORY" as const,
+            path: pending.path,
+            base: [{ path: pending.path, state: "UNKNOWN" as const }],
+        } satisfies components["schemas"]["DirectoryCreateOperationRequest"];
+        return this.submitMetadataOperation(
+            serverUrl,
+            metadata,
+            pending.operationId,
+        );
+    }
+
+    public async submitDirectoryDelete(
+        serverUrl: string,
+        pending: PendingDirectoryDelete,
+    ): Promise<SubmitOperationResult> {
+        const metadata = {
+            operationId: pending.operationId,
+            clientId: pending.clientId,
+            type: "DELETE" as const,
+            entryType: "DIRECTORY" as const,
+            path: pending.path,
+            base: [
+                {
+                    path: pending.path,
+                    state: "PRESENT" as const,
+                    revision: pending.baseRevision,
+                },
+            ],
+        } satisfies components["schemas"]["DirectoryDeleteOperationRequest"];
+        return this.submitMetadataOperation(
+            serverUrl,
+            metadata,
+            pending.operationId,
+        );
+    }
+
+    public async submitDirectoryRename(
+        serverUrl: string,
+        pending: PendingDirectoryRename,
+    ): Promise<SubmitOperationResult> {
+        return this.submitDirectoryPathChange(serverUrl, pending);
+    }
+
+    public async submitDirectoryMove(
+        serverUrl: string,
+        pending: PendingDirectoryMove,
+    ): Promise<SubmitOperationResult> {
+        return this.submitDirectoryPathChange(serverUrl, pending);
+    }
+
     private async submitPathChange(
         serverUrl: string,
         pending: PendingRename | PendingMove,
@@ -359,6 +437,61 @@ export class ServerClient implements SyncTransport {
             response.text,
             pending.operationId,
         );
+    }
+
+    private async submitDirectoryPathChange(
+        serverUrl: string,
+        pending: PendingDirectoryRename | PendingDirectoryMove,
+    ): Promise<SubmitOperationResult> {
+        const base = [
+            {
+                path: pending.path,
+                state: "PRESENT" as const,
+                revision: pending.baseRevision,
+            },
+            { path: pending.destinationPath, state: "UNKNOWN" as const },
+        ];
+        const metadata =
+            pending.type === "DIRECTORY_RENAME"
+                ? ({
+                      operationId: pending.operationId,
+                      clientId: pending.clientId,
+                      type: "RENAME",
+                      entryType: "DIRECTORY",
+                      sourcePath: pending.path,
+                      destinationPath: pending.destinationPath,
+                      base,
+                  } satisfies components["schemas"]["DirectoryRenameOperationRequest"])
+                : ({
+                      operationId: pending.operationId,
+                      clientId: pending.clientId,
+                      type: "MOVE",
+                      entryType: "DIRECTORY",
+                      sourcePath: pending.path,
+                      destinationPath: pending.destinationPath,
+                      base,
+                  } satisfies components["schemas"]["DirectoryMoveOperationRequest"]);
+        return this.submitMetadataOperation(
+            serverUrl,
+            metadata,
+            pending.operationId,
+        );
+    }
+
+    private async submitMetadataOperation(
+        serverUrl: string,
+        metadata: components["schemas"]["MetadataOperationRequest"],
+        operationId: string,
+    ): Promise<SubmitOperationResult> {
+        const response = await requestUrl({
+            url: `${serverUrl}/api/v1/operations`,
+            method: "POST",
+            contentType: "application/json",
+            body: JSON.stringify(metadata),
+            throw: false,
+        });
+
+        return operationResponse(response.status, response.text, operationId);
     }
 
     private async submitContentOperation(

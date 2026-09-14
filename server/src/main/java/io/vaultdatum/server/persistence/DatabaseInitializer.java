@@ -3,6 +3,7 @@ package io.vaultdatum.server.persistence;
 import io.vaultdatum.server.config.DataDirectories;
 import io.vaultdatum.server.sync.CreateCoordinator;
 import io.vaultdatum.server.sync.DeleteCoordinator;
+import io.vaultdatum.server.sync.DirectoryCoordinator;
 import io.vaultdatum.server.sync.ModifyCoordinator;
 import io.vaultdatum.server.sync.PathChangeCoordinator;
 import io.quarkus.runtime.Startup;
@@ -28,6 +29,8 @@ public final class DatabaseInitializer {
 
     private final PathChangeCoordinator pathChangeCoordinator;
 
+    private final DirectoryCoordinator directoryCoordinator;
+
     public DatabaseInitializer(
             DataDirectories dataDirectories,
             Flyway flyway,
@@ -35,7 +38,8 @@ public final class DatabaseInitializer {
             CreateCoordinator createCoordinator,
             ModifyCoordinator modifyCoordinator,
             DeleteCoordinator deleteCoordinator,
-            PathChangeCoordinator pathChangeCoordinator) {
+            PathChangeCoordinator pathChangeCoordinator,
+            DirectoryCoordinator directoryCoordinator) {
         this.dataDirectories = dataDirectories;
         this.flyway = flyway;
         this.vaultMetadataRepository = vaultMetadataRepository;
@@ -43,6 +47,7 @@ public final class DatabaseInitializer {
         this.modifyCoordinator = modifyCoordinator;
         this.deleteCoordinator = deleteCoordinator;
         this.pathChangeCoordinator = pathChangeCoordinator;
+        this.directoryCoordinator = directoryCoordinator;
     }
 
     @PostConstruct
@@ -54,5 +59,6 @@ public final class DatabaseInitializer {
         modifyCoordinator.recoverPreparedModifies();
         deleteCoordinator.recoverPreparedDeletes();
         pathChangeCoordinator.recoverPreparedPathChanges();
+        directoryCoordinator.recoverPreparedDirectories();
     }
 }

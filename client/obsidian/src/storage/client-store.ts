@@ -48,12 +48,37 @@ export interface PendingMove extends PendingOperationBase {
     readonly baseContentHash: string;
 }
 
+export interface PendingDirectoryCreate extends PendingOperationBase {
+    readonly type: "DIRECTORY_CREATE";
+}
+
+export interface PendingDirectoryDelete extends PendingOperationBase {
+    readonly type: "DIRECTORY_DELETE";
+    readonly baseRevision: number;
+}
+
+export interface PendingDirectoryRename extends PendingOperationBase {
+    readonly type: "DIRECTORY_RENAME";
+    readonly destinationPath: string;
+    readonly baseRevision: number;
+}
+
+export interface PendingDirectoryMove extends PendingOperationBase {
+    readonly type: "DIRECTORY_MOVE";
+    readonly destinationPath: string;
+    readonly baseRevision: number;
+}
+
 export type PendingOperation =
     | PendingCreate
     | PendingModify
     | PendingDelete
     | PendingRename
-    | PendingMove;
+    | PendingMove
+    | PendingDirectoryCreate
+    | PendingDirectoryDelete
+    | PendingDirectoryRename
+    | PendingDirectoryMove;
 export type ReplicaState = "PRESENT" | "DELETED";
 
 export interface ReplicaEntry {
@@ -286,6 +311,16 @@ export class ClientStore {
         await this.put(PENDING_STORE, pending);
     }
 
+    public async saveDirectoryOperation(
+        pending:
+            | PendingDirectoryCreate
+            | PendingDirectoryDelete
+            | PendingDirectoryRename
+            | PendingDirectoryMove,
+    ): Promise<void> {
+        await this.put(PENDING_STORE, pending);
+    }
+
     public async pendingOperations(): Promise<PendingOperation[]> {
         const records = await this.pendingRecords();
         return records
@@ -430,8 +465,8 @@ export class ClientStore {
     }
 
     public async hasStoredOperationForPath(path: string): Promise<boolean> {
-        return (await this.pendingRecords()).some(
-            (record) => affectsPath(record, path),
+        return (await this.pendingRecords()).some((record) =>
+            affectsPath(record, path),
         );
     }
 
@@ -541,6 +576,18 @@ export class ClientStore {
         return intents.some(
             (intent) =>
                 intent.path === path && intent.after.state === "DELETED",
+        );
+    }
+
+    public async hasPreparedRemoteDirectoryApply(
+        path: string,
+    ): Promise<boolean> {
+        const intents = await this.applyIntents();
+        return intents.some(
+            (intent) =>
+                intent.path === path &&
+                intent.after.entryType === "DIRECTORY" &&
+                intent.after.state === "PRESENT",
         );
     }
 
@@ -871,8 +918,22 @@ function isContentOperation(
 function affectsPath(pending: PendingOperation, path: string): boolean {
     return (
         pending.path === path ||
-        ((pending.type === "RENAME" || pending.type === "MOVE") &&
-            pending.destinationPath === path)
+        (isPathChange(pending) && pending.destinationPath === path)
+    );
+}
+
+function isPathChange(
+    pending: PendingOperation,
+): pending is
+    | PendingRename
+    | PendingMove
+    | PendingDirectoryRename
+    | PendingDirectoryMove {
+    return (
+        pending.type === "RENAME" ||
+        pending.type === "MOVE" ||
+        pending.type === "DIRECTORY_RENAME" ||
+        pending.type === "DIRECTORY_MOVE"
     );
 }
 

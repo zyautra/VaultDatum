@@ -10,6 +10,10 @@ import {
     type ManualMergeResolution,
     type PendingCreate,
     type PendingDelete,
+    type PendingDirectoryCreate,
+    type PendingDirectoryDelete,
+    type PendingDirectoryMove,
+    type PendingDirectoryRename,
     type PendingMove,
     type PendingModify,
     type PendingRename,
@@ -77,6 +81,193 @@ async function appliesABinaryAttachmentWithoutTextConversion(): Promise<void> {
         new Uint8Array((await vault.readFile(path)) ?? new ArrayBuffer(0)),
         new Uint8Array(content),
     );
+    store.close();
+}
+
+async function appliesAnEmptyRemoteDirectory(): Promise<void> {
+    const path = "notes/empty";
+    const store = await ClientStore.open(
+        `test-remote-directory-create-${crypto.randomUUID()}`,
+    );
+    const vault = new MemoryVault();
+    const apply = new RemoteApply(
+        store,
+        new DownloadTransport(bytes("")),
+        vault,
+    );
+
+    const result = await apply.integrateChange("https://vaultdatum.test", {
+        revision: 1,
+        type: "CREATE",
+        operationId: `OP-${crypto.randomUUID()}`,
+        actor: { type: "CLIENT", clientId: "C-remote-client" },
+        effects: [{ path, entryType: "DIRECTORY", state: "PRESENT" }],
+    });
+
+    assert.equal(result.conflicted, 0);
+    assert.equal(await vault.directoryExists(path), true);
+    assert.deepEqual(await store.replica(path), {
+        path,
+        entryType: "DIRECTORY",
+        state: "PRESENT",
+        revision: 1,
+    });
+    assert.deepEqual(await store.applyIntents(), []);
+    store.close();
+}
+
+async function appliesAnEmptyRemoteDirectoryDelete(): Promise<void> {
+    const path = "notes/empty";
+    const store = await ClientStore.open(
+        `test-remote-directory-delete-${crypto.randomUUID()}`,
+    );
+    const vault = new MemoryVault();
+    await vault.createDirectory(path);
+    await store.putReplica({
+        path,
+        entryType: "DIRECTORY",
+        state: "PRESENT",
+        revision: 1,
+    });
+    const apply = new RemoteApply(
+        store,
+        new DownloadTransport(bytes("")),
+        vault,
+    );
+
+    const result = await apply.integrateChange("https://vaultdatum.test", {
+        revision: 2,
+        type: "DELETE",
+        operationId: `OP-${crypto.randomUUID()}`,
+        actor: { type: "CLIENT", clientId: "C-remote-client" },
+        effects: [{ path, entryType: "DIRECTORY", state: "DELETED" }],
+    });
+
+    assert.equal(result.conflicted, 0);
+    assert.equal(await vault.directoryExists(path), false);
+    assert.deepEqual(await store.replica(path), {
+        path,
+        entryType: "DIRECTORY",
+        state: "DELETED",
+        revision: 2,
+    });
+    store.close();
+}
+
+async function queuesAnEmptyLocalDirectory(): Promise<void> {
+    const path = "notes/empty";
+    const store = await ClientStore.open(
+        `test-local-directory-create-${crypto.randomUUID()}`,
+    );
+    const vault = new MemoryVault();
+    await vault.createDirectory(path);
+    const sync = new CreateSync(store, new NoopTransport(), vault, () => "");
+
+    const pending = await sync.captureDirectoryCreate(path);
+
+    assert.equal(pending?.type, "DIRECTORY_CREATE");
+    assert.equal((await store.pendingOperations()).length, 1);
+    store.close();
+}
+
+async function observesAnOwnDirectoryMove(): Promise<void> {
+    const sourcePath = "notes/empty";
+    const destinationPath = "archive/empty";
+    const store = await ClientStore.open(
+        `test-own-directory-move-${crypto.randomUUID()}`,
+    );
+    const vault = new MemoryVault();
+    await vault.createDirectory(destinationPath);
+    const clientId = await store.clientId();
+    const pending = {
+        operationId: `OP-${crypto.randomUUID()}`,
+        clientId,
+        type: "DIRECTORY_MOVE" as const,
+        path: sourcePath,
+        destinationPath,
+        baseRevision: 1,
+        createdAt: new Date().toISOString(),
+        status: "COMMITTED" as const,
+    };
+    await store.saveDirectoryOperation(pending);
+    await store.putReplica({
+        path: sourcePath,
+        entryType: "DIRECTORY",
+        state: "PRESENT",
+        revision: 1,
+    });
+
+    const apply = new RemoteApply(
+        store,
+        new DownloadTransport(bytes("")),
+        vault,
+    );
+    const result = await apply.integrateChange("https://vaultdatum.test", {
+        revision: 2,
+        type: "MOVE",
+        operationId: pending.operationId,
+        actor: { type: "CLIENT", clientId },
+        effects: [
+            { path: sourcePath, entryType: "DIRECTORY", state: "DELETED" },
+            {
+                path: destinationPath,
+                entryType: "DIRECTORY",
+                state: "PRESENT",
+            },
+        ],
+    });
+
+    assert.equal(result.conflicted, 0);
+    assert.equal(await store.operation(pending.operationId), undefined);
+    assert.deepEqual(await store.replica(destinationPath), {
+        path: destinationPath,
+        entryType: "DIRECTORY",
+        state: "PRESENT",
+        revision: 2,
+    });
+    store.close();
+}
+
+async function preservesANonEmptyLocalDirectoryDuringARemoteMove(): Promise<void> {
+    const sourcePath = "notes/empty";
+    const destinationPath = "archive/empty";
+    const store = await ClientStore.open(
+        `test-remote-directory-move-conflict-${crypto.randomUUID()}`,
+    );
+    const vault = new MemoryVault();
+    await vault.createDirectory(sourcePath);
+    await vault.writeFile(`${sourcePath}/local.md`, bytes("local-only"));
+    await store.putReplica({
+        path: sourcePath,
+        entryType: "DIRECTORY",
+        state: "PRESENT",
+        revision: 1,
+    });
+    const apply = new RemoteApply(
+        store,
+        new DownloadTransport(bytes("")),
+        vault,
+    );
+
+    const result = await apply.integrateChange("https://vaultdatum.test", {
+        revision: 2,
+        type: "MOVE",
+        operationId: `OP-${crypto.randomUUID()}`,
+        actor: { type: "CLIENT", clientId: "C-remote-client" },
+        effects: [
+            { path: sourcePath, entryType: "DIRECTORY", state: "DELETED" },
+            {
+                path: destinationPath,
+                entryType: "DIRECTORY",
+                state: "PRESENT",
+            },
+        ],
+    });
+
+    assert.equal(result.conflicted, 2);
+    assert.equal(await vault.directoryExists(sourcePath), true);
+    assert.equal(await vault.directoryExists(destinationPath), false);
+    assert.equal((await store.conflicts()).length, 2);
     store.close();
 }
 
@@ -888,7 +1079,10 @@ async function queuesAndObservesAnOwnRenameAsOneOperation(): Promise<void> {
     });
     const sync = new CreateSync(store, new NoopTransport(), vault, () => "");
 
-    const pending = await sync.capturePathChange(sourcePath, destinationPath);
+    const pending = await sync.captureFilePathChange(
+        sourcePath,
+        destinationPath,
+    );
 
     assert.equal(pending?.type, "RENAME");
     if (pending?.type !== "RENAME") {
@@ -946,7 +1140,10 @@ async function queuesAndObservesAnOwnMoveAsOneOperation(): Promise<void> {
     });
     const sync = new CreateSync(store, new NoopTransport(), vault, () => "");
 
-    const pending = await sync.capturePathChange(sourcePath, destinationPath);
+    const pending = await sync.captureFilePathChange(
+        sourcePath,
+        destinationPath,
+    );
 
     assert.equal(pending?.type, "MOVE");
     if (pending?.type !== "MOVE") {
@@ -1876,6 +2073,42 @@ class NoopTransport implements SyncTransport {
         void pending;
         return { kind: "UNAVAILABLE" };
     }
+
+    public async submitDirectoryCreate(
+        serverUrl: string,
+        pending: PendingDirectoryCreate,
+    ): Promise<SubmitOperationResult> {
+        void serverUrl;
+        void pending;
+        return { kind: "UNAVAILABLE" };
+    }
+
+    public async submitDirectoryDelete(
+        serverUrl: string,
+        pending: PendingDirectoryDelete,
+    ): Promise<SubmitOperationResult> {
+        void serverUrl;
+        void pending;
+        return { kind: "UNAVAILABLE" };
+    }
+
+    public async submitDirectoryRename(
+        serverUrl: string,
+        pending: PendingDirectoryRename,
+    ): Promise<SubmitOperationResult> {
+        void serverUrl;
+        void pending;
+        return { kind: "UNAVAILABLE" };
+    }
+
+    public async submitDirectoryMove(
+        serverUrl: string,
+        pending: PendingDirectoryMove,
+    ): Promise<SubmitOperationResult> {
+        void serverUrl;
+        void pending;
+        return { kind: "UNAVAILABLE" };
+    }
 }
 
 class HistoryTransport extends DownloadTransport implements SyncTransport {
@@ -2002,6 +2235,42 @@ class HistoryTransport extends DownloadTransport implements SyncTransport {
     public async submitMove(
         serverUrl: string,
         pending: PendingMove,
+    ): Promise<SubmitOperationResult> {
+        void serverUrl;
+        void pending;
+        return { kind: "UNAVAILABLE" };
+    }
+
+    public async submitDirectoryCreate(
+        serverUrl: string,
+        pending: PendingDirectoryCreate,
+    ): Promise<SubmitOperationResult> {
+        void serverUrl;
+        void pending;
+        return { kind: "UNAVAILABLE" };
+    }
+
+    public async submitDirectoryDelete(
+        serverUrl: string,
+        pending: PendingDirectoryDelete,
+    ): Promise<SubmitOperationResult> {
+        void serverUrl;
+        void pending;
+        return { kind: "UNAVAILABLE" };
+    }
+
+    public async submitDirectoryRename(
+        serverUrl: string,
+        pending: PendingDirectoryRename,
+    ): Promise<SubmitOperationResult> {
+        void serverUrl;
+        void pending;
+        return { kind: "UNAVAILABLE" };
+    }
+
+    public async submitDirectoryMove(
+        serverUrl: string,
+        pending: PendingDirectoryMove,
     ): Promise<SubmitOperationResult> {
         void serverUrl;
         void pending;
@@ -2386,12 +2655,20 @@ class RetryingTransport extends NoopTransport {
 class MemoryVault implements LocalVault {
     private readonly files = new Map<string, ArrayBuffer>();
 
+    private readonly directories = new Set<string>();
+
     public async listFiles(): Promise<
         readonly { readonly path: string; readonly size: number }[]
     > {
         return [...this.files.entries()]
             .map(([path, content]) => ({ path, size: content.byteLength }))
             .sort((left, right) => left.path.localeCompare(right.path));
+    }
+
+    public async listDirectories(): Promise<readonly string[]> {
+        return [...this.directories].sort((left, right) =>
+            left.localeCompare(right),
+        );
     }
 
     public async fileSize(path: string): Promise<number | undefined> {
@@ -2403,6 +2680,7 @@ class MemoryVault implements LocalVault {
     }
 
     public async writeFile(path: string, content: ArrayBuffer): Promise<void> {
+        this.createParentDirectories(path);
         this.files.set(path, content.slice(0));
     }
 
@@ -2410,9 +2688,51 @@ class MemoryVault implements LocalVault {
         this.files.delete(path);
     }
 
+    public async directoryExists(path: string): Promise<boolean> {
+        return this.directories.has(path);
+    }
+
+    public async directoryIsEmpty(path: string): Promise<boolean> {
+        if (!this.directories.has(path)) {
+            return false;
+        }
+        const prefix = `${path}/`;
+        return ![...this.files.keys(), ...this.directories].some((candidate) =>
+            candidate.startsWith(prefix),
+        );
+    }
+
+    public async createDirectory(path: string): Promise<void> {
+        if (this.files.has(path)) {
+            throw new Error("Cannot replace a file with a directory");
+        }
+        this.createParentDirectories(path);
+        this.directories.add(path);
+    }
+
+    public async removeDirectory(path: string): Promise<void> {
+        if (!(await this.directoryIsEmpty(path))) {
+            throw new Error("Cannot remove a non-empty directory");
+        }
+        this.directories.delete(path);
+    }
+
     public async hash(path: string): Promise<string | undefined> {
         const content = await this.readFile(path);
         return content === undefined ? undefined : contentHash(content);
+    }
+
+    private createParentDirectories(path: string): void {
+        const segments = path.split("/");
+        let current = "";
+
+        for (const segment of segments.slice(0, -1)) {
+            current = current.length === 0 ? segment : `${current}/${segment}`;
+            if (this.files.has(current)) {
+                throw new Error("Cannot create a directory over a file");
+            }
+            this.directories.add(current);
+        }
     }
 }
 
@@ -2539,6 +2859,11 @@ async function pendingModify(
 
 await appliesARemoteCreateToAnEmptyVault();
 await appliesABinaryAttachmentWithoutTextConversion();
+await appliesAnEmptyRemoteDirectory();
+await appliesAnEmptyRemoteDirectoryDelete();
+await queuesAnEmptyLocalDirectory();
+await observesAnOwnDirectoryMove();
+await preservesANonEmptyLocalDirectoryDuringARemoteMove();
 await refusesToQueueContentAboveTheAttachmentLimit();
 await skipsOversizedAttachmentsDuringReconciliation();
 await refusesAnOversizedRemoteAttachmentBeforeDownloading();

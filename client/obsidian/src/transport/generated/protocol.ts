@@ -161,9 +161,9 @@ export interface paths {
         put?: never;
         /**
          * Submit an idempotent mutation to the authoritative Vault
-         * @description DELETE, RENAME, and MOVE use `application/json`. CREATE and MODIFY use
-         *     `multipart/form-data`, with JSON metadata in `operation` and the file
-         *     bytes in `content`.
+         * @description File CREATE and MODIFY use `multipart/form-data`, with JSON metadata in
+         *     `operation` and the file bytes in `content`. DELETE, RENAME, MOVE, and
+         *     empty-directory mutations use `application/json`.
          */
         post: operations["submitOperation"];
         delete?: never;
@@ -366,6 +366,7 @@ export interface components {
         BaseCondition:
             | components["schemas"]["UnknownBaseCondition"]
             | components["schemas"]["PresentBaseCondition"]
+            | components["schemas"]["PresentDirectoryBaseCondition"]
             | components["schemas"]["DeletedBaseCondition"];
         UnknownBaseCondition: {
             path: components["schemas"]["SyncPath"];
@@ -378,6 +379,12 @@ export interface components {
             state: "PRESENT";
             revision: components["schemas"]["CommittedRevision"];
             contentHash: components["schemas"]["ContentHash"];
+        };
+        PresentDirectoryBaseCondition: {
+            path: components["schemas"]["SyncPath"];
+            /** @constant */
+            state: "PRESENT";
+            revision: components["schemas"]["CommittedRevision"];
         };
         DeletedBaseCondition: {
             path: components["schemas"]["SyncPath"];
@@ -395,14 +402,22 @@ export interface components {
             | components["schemas"]["ModifyOperationRequest"]
             | components["schemas"]["DeleteOperationRequest"]
             | components["schemas"]["RenameOperationRequest"]
-            | components["schemas"]["MoveOperationRequest"];
+            | components["schemas"]["MoveOperationRequest"]
+            | components["schemas"]["DirectoryCreateOperationRequest"]
+            | components["schemas"]["DirectoryDeleteOperationRequest"]
+            | components["schemas"]["DirectoryRenameOperationRequest"]
+            | components["schemas"]["DirectoryMoveOperationRequest"];
         ContentOperationRequest:
             | components["schemas"]["CreateOperationRequest"]
             | components["schemas"]["ModifyOperationRequest"];
         MetadataOperationRequest:
             | components["schemas"]["DeleteOperationRequest"]
             | components["schemas"]["RenameOperationRequest"]
-            | components["schemas"]["MoveOperationRequest"];
+            | components["schemas"]["MoveOperationRequest"]
+            | components["schemas"]["DirectoryCreateOperationRequest"]
+            | components["schemas"]["DirectoryDeleteOperationRequest"]
+            | components["schemas"]["DirectoryRenameOperationRequest"]
+            | components["schemas"]["DirectoryMoveOperationRequest"];
         CreateOperationRequest: {
             operationId: components["schemas"]["OperationId"];
             clientId: components["schemas"]["ClientId"];
@@ -443,6 +458,48 @@ export interface components {
             clientId: components["schemas"]["ClientId"];
             /** @constant */
             type: "MOVE";
+            sourcePath: components["schemas"]["SyncPath"];
+            destinationPath: components["schemas"]["SyncPath"];
+            base: components["schemas"]["BaseCondition"][];
+        };
+        DirectoryCreateOperationRequest: {
+            operationId: components["schemas"]["OperationId"];
+            clientId: components["schemas"]["ClientId"];
+            /** @constant */
+            type: "CREATE";
+            /** @constant */
+            entryType: "DIRECTORY";
+            path: components["schemas"]["SyncPath"];
+            base: components["schemas"]["UnknownBaseCondition"][];
+        };
+        DirectoryDeleteOperationRequest: {
+            operationId: components["schemas"]["OperationId"];
+            clientId: components["schemas"]["ClientId"];
+            /** @constant */
+            type: "DELETE";
+            /** @constant */
+            entryType: "DIRECTORY";
+            path: components["schemas"]["SyncPath"];
+            base: components["schemas"]["PresentDirectoryBaseCondition"][];
+        };
+        DirectoryRenameOperationRequest: {
+            operationId: components["schemas"]["OperationId"];
+            clientId: components["schemas"]["ClientId"];
+            /** @constant */
+            type: "RENAME";
+            /** @constant */
+            entryType: "DIRECTORY";
+            sourcePath: components["schemas"]["SyncPath"];
+            destinationPath: components["schemas"]["SyncPath"];
+            base: components["schemas"]["BaseCondition"][];
+        };
+        DirectoryMoveOperationRequest: {
+            operationId: components["schemas"]["OperationId"];
+            clientId: components["schemas"]["ClientId"];
+            /** @constant */
+            type: "MOVE";
+            /** @constant */
+            entryType: "DIRECTORY";
             sourcePath: components["schemas"]["SyncPath"];
             destinationPath: components["schemas"]["SyncPath"];
             base: components["schemas"]["BaseCondition"][];

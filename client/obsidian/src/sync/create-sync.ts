@@ -6,6 +6,10 @@ import {
     type LocalScanBaseline,
     type PendingCreate,
     type PendingDelete,
+    type PendingDirectoryCreate,
+    type PendingDirectoryDelete,
+    type PendingDirectoryMove,
+    type PendingDirectoryRename,
     type PendingMove,
     type PendingModify,
     type PendingOperation,
@@ -114,7 +118,7 @@ export class CreateSync {
         return pending;
     }
 
-    public async capturePathChange(
+    public async captureFilePathChange(
         sourcePath: string,
         destinationPath: string,
     ): Promise<PendingRename | PendingMove | undefined> {
@@ -164,6 +168,120 @@ export class CreateSync {
                       status: "READY",
                   } satisfies PendingMove);
         await this.store.savePathChange(pending);
+        return pending;
+    }
+
+    public async captureDirectoryCreate(
+        path: string,
+    ): Promise<PendingDirectoryCreate | undefined> {
+        if (
+            !isSyncPath(path) ||
+            !(await this.localVault.directoryIsEmpty(path)) ||
+            (await this.store.hasPreparedRemoteDirectoryApply(path)) ||
+            (await this.store.hasConflict(path)) ||
+            (await this.store.findActiveOperation(path)) !== undefined ||
+            (await this.store.replica(path)) !== undefined
+        ) {
+            return undefined;
+        }
+        const pending: PendingDirectoryCreate = {
+            operationId: `OP-${crypto.randomUUID()}`,
+            clientId: await this.store.clientId(),
+            type: "DIRECTORY_CREATE",
+            path,
+            createdAt: new Date().toISOString(),
+            status: "READY",
+        };
+        await this.store.saveDirectoryOperation(pending);
+        return pending;
+    }
+
+    public async captureDirectoryDelete(
+        path: string,
+    ): Promise<PendingDirectoryDelete | undefined> {
+        if (
+            !isSyncPath(path) ||
+            (await this.store.hasPreparedRemoteDelete(path)) ||
+            (await this.store.hasConflict(path)) ||
+            (await this.hasPresentDescendants(path))
+        ) {
+            return undefined;
+        }
+        const active = await this.store.findActiveOperation(path);
+        if (active?.type === "DIRECTORY_CREATE" && active.status === "READY") {
+            await this.store.discardPending(active.operationId);
+            return undefined;
+        }
+        if (active?.type === "DIRECTORY_DELETE") {
+            return active;
+        }
+        if (active !== undefined) {
+            return undefined;
+        }
+        const replica = await this.store.replica(path);
+        if (replica?.entryType !== "DIRECTORY" || replica.state !== "PRESENT") {
+            return undefined;
+        }
+        const pending: PendingDirectoryDelete = {
+            operationId: `OP-${crypto.randomUUID()}`,
+            clientId: await this.store.clientId(),
+            type: "DIRECTORY_DELETE",
+            path,
+            baseRevision: replica.revision,
+            createdAt: new Date().toISOString(),
+            status: "READY",
+        };
+        await this.store.saveDirectoryOperation(pending);
+        return pending;
+    }
+
+    public async captureDirectoryPathChange(
+        sourcePath: string,
+        destinationPath: string,
+    ): Promise<PendingDirectoryRename | PendingDirectoryMove | undefined> {
+        if (
+            !isSyncPath(sourcePath) ||
+            !isSyncPath(destinationPath) ||
+            sourcePath === destinationPath ||
+            (await this.store.hasConflict(sourcePath)) ||
+            (await this.store.hasConflict(destinationPath)) ||
+            (await this.store.findActiveOperation(sourcePath)) !== undefined ||
+            (await this.store.findActiveOperation(destinationPath)) !==
+                undefined ||
+            (await this.hasPresentDescendants(sourcePath))
+        ) {
+            return undefined;
+        }
+        const source = await this.store.replica(sourcePath);
+        if (source?.entryType !== "DIRECTORY" || source.state !== "PRESENT") {
+            return undefined;
+        }
+        if ((await this.store.replica(destinationPath)) !== undefined) {
+            return undefined;
+        }
+        const pending =
+            parentPath(sourcePath) === parentPath(destinationPath)
+                ? ({
+                      operationId: `OP-${crypto.randomUUID()}`,
+                      clientId: await this.store.clientId(),
+                      type: "DIRECTORY_RENAME",
+                      path: sourcePath,
+                      destinationPath,
+                      baseRevision: source.revision,
+                      createdAt: new Date().toISOString(),
+                      status: "READY",
+                  } satisfies PendingDirectoryRename)
+                : ({
+                      operationId: `OP-${crypto.randomUUID()}`,
+                      clientId: await this.store.clientId(),
+                      type: "DIRECTORY_MOVE",
+                      path: sourcePath,
+                      destinationPath,
+                      baseRevision: source.revision,
+                      createdAt: new Date().toISOString(),
+                      status: "READY",
+                  } satisfies PendingDirectoryMove);
+        await this.store.saveDirectoryOperation(pending);
         return pending;
     }
 
@@ -265,10 +383,21 @@ export class CreateSync {
 
         const active = await this.store.findActiveOperation(path);
         if (active !== undefined) {
-            if (active.type === "DELETE") {
+            if (
+                active.type === "DELETE" ||
+                active.type === "DIRECTORY_DELETE"
+            ) {
                 return active;
             }
-            if (active.type === "RENAME" || active.type === "MOVE") {
+            if (
+                active.type === "RENAME" ||
+                active.type === "MOVE" ||
+                active.type === "DIRECTORY_RENAME" ||
+                active.type === "DIRECTORY_MOVE"
+            ) {
+                return active;
+            }
+            if (active.type === "DIRECTORY_CREATE") {
                 return active;
             }
             const updated = {
@@ -447,6 +576,9 @@ export class CreateSync {
                 localFiles.set(file.path, file.size);
             }
         }
+        const localDirectories = new Set(
+            (await this.localVault.listDirectories()).filter(isSyncPath),
+        );
         const oversizedPaths = new Set(
             [...localFiles.entries()]
                 .filter(([, size]) => exceedsSyncContentLimit(size))
@@ -500,6 +632,21 @@ export class CreateSync {
 
             const file = local.get(replica.path);
             if (replica.state === "PRESENT") {
+                if (replica.entryType === "DIRECTORY") {
+                    if (file !== undefined) {
+                        if (
+                            await this.remoteApply.recordLocalDivergence(
+                                replica.path,
+                                replica,
+                            )
+                        ) {
+                            conflicted += 1;
+                        }
+                    } else if (!localDirectories.has(replica.path)) {
+                        await this.captureDirectoryDelete(replica.path);
+                    }
+                    continue;
+                }
                 if (!isPresentFile(replica)) {
                     if (
                         await this.remoteApply.recordLocalDivergence(
@@ -519,14 +666,15 @@ export class CreateSync {
                 continue;
             }
 
-            if (
-                file !== undefined &&
-                (await this.remoteApply.recordLocalDivergence(
-                    replica.path,
-                    replica,
-                ))
-            ) {
-                conflicted += 1;
+            if (file !== undefined || localDirectories.has(replica.path)) {
+                if (
+                    await this.remoteApply.recordLocalDivergence(
+                        replica.path,
+                        replica,
+                    )
+                ) {
+                    conflicted += 1;
+                }
             }
         }
 
@@ -544,6 +692,17 @@ export class CreateSync {
                 continue;
             }
             await this.captureModify(path, file.content);
+        }
+
+        for (const path of localDirectories) {
+            if (
+                (await this.store.replica(path)) !== undefined ||
+                (await this.store.hasConflict(path)) ||
+                (await this.store.hasStoredOperationForPath(path))
+            ) {
+                continue;
+            }
+            await this.captureDirectoryCreate(path);
         }
 
         return { conflicted, oversized: oversizedPaths.size };
@@ -845,6 +1004,18 @@ export class CreateSync {
         if (pending.type === "MOVE") {
             return this.serverClient.submitMove(serverUrl, pending);
         }
+        if (pending.type === "DIRECTORY_CREATE") {
+            return this.serverClient.submitDirectoryCreate(serverUrl, pending);
+        }
+        if (pending.type === "DIRECTORY_DELETE") {
+            return this.serverClient.submitDirectoryDelete(serverUrl, pending);
+        }
+        if (pending.type === "DIRECTORY_RENAME") {
+            return this.serverClient.submitDirectoryRename(serverUrl, pending);
+        }
+        if (pending.type === "DIRECTORY_MOVE") {
+            return this.serverClient.submitDirectoryMove(serverUrl, pending);
+        }
 
         const artifact = await this.store.artifact(pending.artifactId);
         if (artifact === undefined) {
@@ -868,6 +1039,14 @@ export class CreateSync {
 
         const pending = await this.store.operation(change.operationId);
         return pending?.clientId === change.actor.clientId;
+    }
+
+    private async hasPresentDescendants(path: string): Promise<boolean> {
+        const prefix = `${path}/`;
+        return (await this.store.replicas()).some(
+            (entry) =>
+                entry.path.startsWith(prefix) && entry.state === "PRESENT",
+        );
     }
 }
 

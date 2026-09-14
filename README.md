@@ -35,20 +35,23 @@ npm --prefix client/obsidian run build
 ```
 
 The health endpoint is available at `GET /health` on port 8080. The server also
-exposes `GET /api/v1/vault` and `POST /api/v1/operations` for multipart
-`CREATE`/`MODIFY` and JSON `DELETE`/`RENAME` requests.
+exposes `GET /api/v1/vault` and `POST /api/v1/operations` for multipart file
+`CREATE`/`MODIFY` and JSON file or empty-directory `CREATE`/`DELETE`/
+`RENAME`/`MOVE` requests.
 
 The server durably records a mutation as `PREPARED` before changing the Vault
-filesystem. Startup recovery completes prepared CREATE, MODIFY, DELETE, and
-RENAME operations whether their filesystem effect had not yet occurred or had
-already occurred before SQLite finalization. A committed operation is
-idempotently replayed if its response was lost.
+filesystem. Startup recovery completes prepared file and empty-directory
+CREATE, MODIFY, DELETE, RENAME, and MOVE operations whether their filesystem
+effect had not yet occurred or had already occurred before SQLite finalization.
+A committed operation is idempotently replayed if its response was lost.
 
 ## Current Sync Slice
 
 The Obsidian plugin has a **Server URL** setting. After the plugin has started,
 a new, modified, deleted, renamed, or moved file outside `.obsidian/` is captured as
-a durable operation before it is eligible for upload. MODIFY and DELETE retain
+a durable operation before it is eligible for upload. Empty directories are also
+captured and applied as first-class entries; non-empty directories are never
+implicitly renamed or deleted recursively. MODIFY and DELETE retain
 the last replicated revision and content hash as their base condition. A
 same-directory path change is a RENAME; a change of parent directory is a MOVE.
 Both use a PRESENT source base and an UNKNOWN destination base, then commit both
