@@ -1,4 +1,5 @@
 import { contentHash } from "../core/content-hash";
+import { exceedsSyncContentLimit } from "../core/content-limits";
 import { isSyncPath } from "../core/sync-path";
 import {
     type ApplyIntent,
@@ -19,8 +20,14 @@ import {
     type RemoteManifestEntry,
 } from "../transport/server-client";
 
+export interface LocalVaultFile {
+    readonly path: string;
+    readonly size: number;
+}
+
 export interface LocalVault {
-    listFiles(): Promise<readonly string[]>;
+    listFiles(): Promise<readonly LocalVaultFile[]>;
+    fileSize(path: string): Promise<number | undefined>;
     readFile(path: string): Promise<ArrayBuffer | undefined>;
     writeFile(path: string, content: ArrayBuffer): Promise<void>;
     removeFile(path: string): Promise<void>;
@@ -106,6 +113,16 @@ export class RemoteApply {
         }
 
         const after = replicaEntry(entry.revision, effect);
+        if (remoteContentExceedsLimit(after)) {
+            await this.recordConflict(
+                effect.path,
+                after,
+                "REMOTE_CONTENT_TOO_LARGE",
+                undefined,
+                `manifest:${entry.revision}:${entry.path}`,
+            );
+            return { conflicted: 1 };
+        }
         if (await this.store.hasConflict(effect.path)) {
             await this.store.putReplica(after);
             return { conflicted: 0 };
@@ -118,6 +135,17 @@ export class RemoteApply {
                 after,
                 "SERVER_MANIFEST_OVERLAPS_PENDING",
                 pending,
+                `manifest:${entry.revision}:${entry.path}`,
+            );
+            return { conflicted: 1 };
+        }
+
+        if (await this.localContentExceedsLimit(effect.path)) {
+            await this.recordConflict(
+                effect.path,
+                after,
+                "LOCAL_CONTENT_TOO_LARGE",
+                undefined,
                 `manifest:${entry.revision}:${entry.path}`,
             );
             return { conflicted: 1 };
@@ -166,6 +194,18 @@ export class RemoteApply {
         return true;
     }
 
+    public async recordLocalContentTooLarge(
+        path: string,
+        serverState: ReplicaEntry,
+    ): Promise<boolean> {
+        if (await this.store.hasConflict(path)) {
+            return false;
+        }
+
+        await this.recordConflict(path, serverState, "LOCAL_CONTENT_TOO_LARGE");
+        return true;
+    }
+
     private async integrateOwnRename(
         change: RemoteChange,
         pending: PendingOperation,
@@ -177,6 +217,17 @@ export class RemoteApply {
                 throw new Error("Server returned an invalid sync path");
             }
             const after = replicaEntry(change.revision, effect);
+            if (await this.localContentExceedsLimit(effect.path)) {
+                await this.recordConflict(
+                    effect.path,
+                    after,
+                    "LOCAL_CONTENT_TOO_LARGE",
+                    pending,
+                    change.operationId,
+                );
+                conflicted += 1;
+                continue;
+            }
             const actual = await this.localHash(effect.path);
             if (!matches(after, actual)) {
                 await this.recordConflict(
@@ -218,6 +269,7 @@ export class RemoteApply {
             if (
                 (await this.store.hasConflict(effect.path)) ||
                 pending !== undefined ||
+                (await this.localContentExceedsLimit(effect.path)) ||
                 !matches(
                     await this.store.replica(effect.path),
                     await this.localHash(effect.path),
@@ -299,7 +351,7 @@ export class RemoteApply {
         if (!isSyncPath(destinationPath) || destinationPath === path) {
             throw new Error("The local copy needs a different valid sync path");
         }
-        if ((await this.localVault.readFile(destinationPath)) !== undefined) {
+        if ((await this.localVault.fileSize(destinationPath)) !== undefined) {
             throw new Error("The local copy path already exists");
         }
         if (
@@ -322,6 +374,7 @@ export class RemoteApply {
             );
         }
 
+        await this.requireLocalContentWithinLimit(path);
         const localContent = await this.localVault.readFile(path);
         if (localContent === undefined) {
             throw new Error("Keeping both files requires a local file");
@@ -373,6 +426,10 @@ export class RemoteApply {
             throw new Error("The conflict no longer exists");
         }
         const serverState = await this.presentServerFile(path);
+        if (exceedsSyncContentLimit(serverState.size)) {
+            throw new Error("Server content exceeds the attachment size limit");
+        }
+        await this.requireLocalContentWithinLimit(path);
         const local = await this.localVault.readFile(path);
         if (local === undefined) {
             throw new Error("Manual merging requires a local file");
@@ -402,7 +459,11 @@ export class RemoteApply {
         if ((await this.store.conflict(path)) === undefined) {
             return false;
         }
+        if (exceedsSyncContentLimit(mergedContent.byteLength)) {
+            throw new Error("Merged content exceeds the attachment size limit");
+        }
         const serverState = await this.presentServerFile(path);
+        await this.requireLocalContentWithinLimit(path);
         const local = await this.localVault.readFile(path);
         if (local === undefined) {
             throw new Error("Manual merging requires a local file");
@@ -464,6 +525,7 @@ export class RemoteApply {
             );
         }
 
+        await this.requireLocalContentWithinLimit(path);
         const localContent = await this.localVault.readFile(path);
         if (localContent === undefined) {
             throw new Error("Applying local content requires a local file");
@@ -499,7 +561,7 @@ export class RemoteApply {
         if ((await this.store.conflict(path)) === undefined) {
             return false;
         }
-        if ((await this.localVault.readFile(path)) !== undefined) {
+        if ((await this.localVault.fileSize(path)) !== undefined) {
             throw new Error(
                 "Keeping a deletion requires the local file to be absent",
             );
@@ -548,6 +610,7 @@ export class RemoteApply {
             );
         }
 
+        await this.requireLocalContentWithinLimit(path);
         const localContent = await this.localVault.readFile(path);
         if (localContent === undefined) {
             throw new Error("Restoring local content requires a local file");
@@ -576,6 +639,9 @@ export class RemoteApply {
         serverUrl: string,
         resolution: KeepBothResolution,
     ): Promise<boolean> {
+        if (exceedsSyncContentLimit(resolution.pending.size)) {
+            throw new Error("The local copy exceeds the attachment size limit");
+        }
         const artifact = await this.store.artifact(
             resolution.pending.artifactId,
         );
@@ -628,6 +694,11 @@ export class RemoteApply {
     private async continueManualMergeResolution(
         resolution: ManualMergeResolution,
     ): Promise<void> {
+        if (exceedsSyncContentLimit(resolution.pending.size)) {
+            throw new Error(
+                "The manual merge exceeds the attachment size limit",
+            );
+        }
         const artifact = await this.store.artifact(
             resolution.pending.artifactId,
         );
@@ -643,6 +714,7 @@ export class RemoteApply {
             throw new Error("The durable manual merge content is invalid");
         }
 
+        await this.requireLocalContentWithinLimit(resolution.path);
         const localContent = await this.localVault.readFile(resolution.path);
         const localHash =
             localContent === undefined
@@ -674,9 +746,31 @@ export class RemoteApply {
         const after = replicaEntry(change.revision, effect);
         const existingReplica = await this.store.replica(effect.path);
 
+        if (remoteContentExceedsLimit(after)) {
+            await this.recordConflict(
+                effect.path,
+                after,
+                "REMOTE_CONTENT_TOO_LARGE",
+                undefined,
+                change.operationId,
+            );
+            return true;
+        }
+
         if (await this.store.hasConflict(effect.path)) {
             await this.store.putReplica(after);
             return false;
+        }
+
+        if (await this.localContentExceedsLimit(effect.path)) {
+            await this.recordConflict(
+                effect.path,
+                after,
+                "LOCAL_CONTENT_TOO_LARGE",
+                undefined,
+                change.operationId,
+            );
+            return true;
         }
 
         const submitted = await this.store.operation(change.operationId);
@@ -769,6 +863,11 @@ export class RemoteApply {
         if (after.contentHash === undefined || after.size === undefined) {
             throw new Error("Server returned an incomplete file state");
         }
+        if (exceedsSyncContentLimit(after.size)) {
+            await this.store.discardApply(intent);
+            await this.recordConflict(path, after, "REMOTE_CONTENT_TOO_LARGE");
+            return true;
+        }
 
         const downloaded = await this.serverClient.downloadContent(
             serverUrl,
@@ -807,7 +906,8 @@ export class RemoteApply {
             stagedContent === undefined ||
             intent.after.state !== "PRESENT" ||
             intent.after.contentHash === undefined ||
-            intent.after.size === undefined
+            intent.after.size === undefined ||
+            exceedsSyncContentLimit(intent.after.size)
         ) {
             await this.store.discardApply(intent);
             return;
@@ -849,6 +949,17 @@ export class RemoteApply {
         return content === undefined ? undefined : contentHash(content);
     }
 
+    private async localContentExceedsLimit(path: string): Promise<boolean> {
+        const size = await this.localVault.fileSize(path);
+        return size !== undefined && exceedsSyncContentLimit(size);
+    }
+
+    private async requireLocalContentWithinLimit(path: string): Promise<void> {
+        if (await this.localContentExceedsLimit(path)) {
+            throw new Error("Local content exceeds the attachment size limit");
+        }
+    }
+
     private async presentServerFile(path: string): Promise<
         ReplicaEntry & {
             readonly entryType: "FILE";
@@ -875,6 +986,14 @@ export class RemoteApply {
             size: serverState.size,
         };
     }
+}
+
+function remoteContentExceedsLimit(entry: ReplicaEntry): boolean {
+    return (
+        entry.state === "PRESENT" &&
+        entry.size !== undefined &&
+        exceedsSyncContentLimit(entry.size)
+    );
 }
 
 function replicaEntry(

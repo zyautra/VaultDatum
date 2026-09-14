@@ -1,5 +1,6 @@
 import { requestUrl } from "obsidian";
 
+import { exceedsSyncContentLimit } from "../core/content-limits";
 import type { components } from "./generated/protocol";
 import type {
     PendingCreate,
@@ -335,6 +336,10 @@ export class ServerClient implements SyncTransport {
         pending: PendingCreate | PendingModify,
         content: Blob,
     ): Promise<SubmitOperationResult> {
+        if (exceedsSyncContentLimit(content.size)) {
+            return { kind: "REJECTED", code: "CONTENT_TOO_LARGE" };
+        }
+
         const metadata = contentMetadata(pending);
         const boundary = `VaultDatum-${crypto.randomUUID()}`;
         const response = await requestUrl({

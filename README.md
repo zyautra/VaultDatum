@@ -82,6 +82,13 @@ it finalizes an already-applied result, resumes a staged safe write, discards an
 unstaged intent for a later retry, or preserves an unexpected local state as a
 conflict.
 
+Images, PDFs, and other regular files use the same raw binary multipart upload
+and conditional binary download path as notes; no file content is encoded in
+JSON. The current client transport uses bounded `ArrayBuffer` transfers, so a
+single synchronized file is limited to 8 MiB. The client checks file metadata
+before reading an oversized file, and the server independently rejects it with
+`413 CONTENT_TOO_LARGE`.
+
 The plugin also keeps a best-effort WebSocket connection to
 `/api/v1/notifications`. A `REVISION_ADVANCED` message contains only the
 latest revision and schedules an ordinary pull-based sync; it never carries

@@ -2,6 +2,7 @@ package io.vaultdatum.server.api;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.vaultdatum.server.config.ContentLimits;
 import io.vaultdatum.server.config.DataDirectories;
 import io.vaultdatum.server.sync.ContentHash;
 import io.vaultdatum.server.sync.BaseStateMismatchException;
@@ -41,6 +42,8 @@ public final class OperationResource {
 
     private final DataDirectories dataDirectories;
 
+    private final ContentLimits contentLimits;
+
     private final CreateCoordinator createCoordinator;
 
     private final ModifyCoordinator modifyCoordinator;
@@ -50,11 +53,13 @@ public final class OperationResource {
     public OperationResource(
             ObjectMapper objectMapper,
             DataDirectories dataDirectories,
+            ContentLimits contentLimits,
             CreateCoordinator createCoordinator,
             ModifyCoordinator modifyCoordinator,
             RevisionNotificationPublisher notificationPublisher) {
         this.objectMapper = objectMapper;
         this.dataDirectories = dataDirectories;
+        this.contentLimits = contentLimits;
         this.createCoordinator = createCoordinator;
         this.modifyCoordinator = modifyCoordinator;
         this.notificationPublisher = notificationPublisher;
@@ -73,6 +78,14 @@ public final class OperationResource {
         }
         if (uploadedContent == null) {
             return error(Response.Status.BAD_REQUEST.getStatusCode(), "INVALID_REQUEST", "Content is required for this operation.");
+        }
+
+        try {
+            if (!contentLimits.accepts(Files.size(uploadedContent.uploadedFile()))) {
+                return error(413, "CONTENT_TOO_LARGE", "Content exceeds the configured size limit.");
+            }
+        } catch (IOException exception) {
+            throw new IllegalStateException("Could not inspect uploaded content", exception);
         }
 
         java.nio.file.Path stagedContent = null;

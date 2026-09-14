@@ -3,6 +3,7 @@ import "fake-indexeddb/auto";
 import assert from "node:assert/strict";
 
 import { contentHash } from "../src/core/content-hash";
+import { MAX_SYNC_CONTENT_BYTES } from "../src/core/content-limits";
 import {
     ClientStore,
     type KeepBothResolution,
@@ -52,6 +53,102 @@ async function appliesARemoteCreateToAnEmptyVault(): Promise<void> {
         size: content.byteLength,
     });
     assert.deepEqual(await store.applyIntents(), []);
+    store.close();
+}
+
+async function appliesABinaryAttachmentWithoutTextConversion(): Promise<void> {
+    const path = "attachments/diagram.png";
+    const content = new Uint8Array([0, 255, 137, 80, 78, 71, 13, 10]).buffer;
+    const contentHashValue = await contentHash(content);
+    const store = await ClientStore.open(
+        `test-binary-attachment-${crypto.randomUUID()}`,
+    );
+    const vault = new MemoryVault();
+    const apply = new RemoteApply(store, new DownloadTransport(content), vault);
+
+    const result = await apply.integrateChange(
+        "https://vaultdatum.test",
+        createChange(path, contentHashValue, content.byteLength),
+    );
+
+    assert.equal(result.conflicted, 0);
+    assert.deepEqual(
+        new Uint8Array((await vault.readFile(path)) ?? new ArrayBuffer(0)),
+        new Uint8Array(content),
+    );
+    store.close();
+}
+
+async function refusesToQueueContentAboveTheAttachmentLimit(): Promise<void> {
+    const store = await ClientStore.open(
+        `test-oversized-attachment-${crypto.randomUUID()}`,
+    );
+    const vault = new MemoryVault();
+    const sync = new CreateSync(store, new NoopTransport(), vault, () => "");
+
+    const pending = await sync.captureCreate(
+        "attachments/too-large.bin",
+        new ArrayBuffer(MAX_SYNC_CONTENT_BYTES + 1),
+    );
+
+    assert.equal(pending, undefined);
+    assert.deepEqual(await store.pendingOperations(), []);
+    store.close();
+}
+
+async function skipsOversizedAttachmentsDuringReconciliation(): Promise<void> {
+    const store = await ClientStore.open(
+        `test-oversized-reconciliation-${crypto.randomUUID()}`,
+    );
+    const vault = new MemoryVault();
+    await vault.writeFile(
+        "attachments/too-large.bin",
+        new ArrayBuffer(MAX_SYNC_CONTENT_BYTES + 1),
+    );
+    const sync = new CreateSync(
+        store,
+        new FullReconciliationTransport(0, 0, [], new Map()),
+        vault,
+        () => "https://vaultdatum.test",
+    );
+
+    const summary = await sync.sync();
+
+    assert.deepEqual(summary, {
+        committed: 0,
+        conflicted: 0,
+        oversized: 1,
+        offline: false,
+        vaultMismatch: false,
+    });
+    assert.deepEqual(await store.pendingOperations(), []);
+    store.close();
+}
+
+async function refusesAnOversizedRemoteAttachmentBeforeDownloading(): Promise<void> {
+    const path = "attachments/server-too-large.pdf";
+    const smallContent = bytes("This content must not be downloaded");
+    const store = await ClientStore.open(
+        `test-oversized-remote-${crypto.randomUUID()}`,
+    );
+    const vault = new MemoryVault();
+    const apply = new RemoteApply(store, new NoopTransport(), vault);
+
+    const result = await apply.integrateChange(
+        "https://vaultdatum.test",
+        createChange(
+            path,
+            await contentHash(smallContent),
+            MAX_SYNC_CONTENT_BYTES + 1,
+        ),
+    );
+
+    assert.equal(result.conflicted, 1);
+    assert.equal(await vault.readFile(path), undefined);
+    assert.equal(
+        (await store.conflict(path))?.code,
+        "REMOTE_CONTENT_TOO_LARGE",
+    );
     store.close();
 }
 
@@ -858,6 +955,7 @@ async function pullsTheLatestContentAfterAnOwnIntermediateChange(): Promise<void
     assert.deepEqual(summary, {
         committed: 0,
         conflicted: 0,
+        oversized: 0,
         offline: false,
         vaultMismatch: false,
     });
@@ -910,6 +1008,7 @@ async function retriesAnInFlightCreateAfterAStoreRestart(): Promise<void> {
     assert.deepEqual(restartedSummary, {
         committed: 1,
         conflicted: 0,
+        oversized: 0,
         offline: false,
         vaultMismatch: false,
     });
@@ -976,6 +1075,7 @@ async function continuesPullingUnrelatedPathsAfterAConflict(): Promise<void> {
     assert.deepEqual(summary, {
         committed: 0,
         conflicted: 1,
+        oversized: 0,
         offline: false,
         vaultMismatch: false,
     });
@@ -2100,10 +2200,16 @@ class RetryingTransport extends NoopTransport {
 class MemoryVault implements LocalVault {
     private readonly files = new Map<string, ArrayBuffer>();
 
-    public async listFiles(): Promise<readonly string[]> {
-        return [...this.files.keys()].sort((left, right) =>
-            left.localeCompare(right),
-        );
+    public async listFiles(): Promise<
+        readonly { readonly path: string; readonly size: number }[]
+    > {
+        return [...this.files.entries()]
+            .map(([path, content]) => ({ path, size: content.byteLength }))
+            .sort((left, right) => left.path.localeCompare(right.path));
+    }
+
+    public async fileSize(path: string): Promise<number | undefined> {
+        return this.files.get(path)?.byteLength;
     }
 
     public async readFile(path: string): Promise<ArrayBuffer | undefined> {
@@ -2246,6 +2352,10 @@ async function pendingModify(
 }
 
 await appliesARemoteCreateToAnEmptyVault();
+await appliesABinaryAttachmentWithoutTextConversion();
+await refusesToQueueContentAboveTheAttachmentLimit();
+await skipsOversizedAttachmentsDuringReconciliation();
+await refusesAnOversizedRemoteAttachmentBeforeDownloading();
 await initializesFromAManifestAndCatchesUpLaterChanges();
 await preservesExistingLocalContentDuringInitialManifestSync();
 await recoversAMissedLocalModificationDuringIntegrityScan();

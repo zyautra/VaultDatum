@@ -1,4 +1,5 @@
 import { contentHash } from "../core/content-hash";
+import { exceedsSyncContentLimit } from "../core/content-limits";
 import { isSyncPath } from "../core/sync-path";
 import {
     ClientStore,
@@ -28,6 +29,7 @@ import {
 export interface SyncSummary {
     readonly committed: number;
     readonly conflicted: number;
+    readonly oversized: number;
     readonly offline: boolean;
     readonly vaultMismatch: boolean;
 }
@@ -235,7 +237,7 @@ export class CreateSync {
         path: string,
         content: ArrayBuffer,
     ): Promise<PendingOperation | undefined> {
-        if (!isSyncPath(path)) {
+        if (!isSyncPath(path) || exceedsSyncContentLimit(content.byteLength)) {
             return undefined;
         }
 
@@ -309,6 +311,7 @@ export class CreateSync {
 
     private async runSync(fullReconciliation: boolean): Promise<SyncSummary> {
         const serverUrl = this.serverUrl();
+        let oversized = 0;
 
         if (serverUrl.length === 0) {
             return unavailable(0, 0);
@@ -317,6 +320,7 @@ export class CreateSync {
         try {
             await this.remoteApply.recoverInterruptedApplies();
             const local = await this.reconcileLocalVault();
+            oversized = local.oversized;
 
             let beforePush = fullReconciliation
                 ? await this.reconcileServerManifest(serverUrl)
@@ -324,19 +328,19 @@ export class CreateSync {
             let beforePushConflicted = local.conflicted + beforePush.conflicted;
 
             if (beforePush.unavailable) {
-                return unavailable(0, beforePushConflicted);
+                return unavailable(0, beforePushConflicted, oversized);
             }
             if (beforePush.historyUnavailable) {
                 const reconciled =
                     await this.reconcileServerManifest(serverUrl);
                 beforePushConflicted += reconciled.conflicted;
                 if (reconciled.unavailable) {
-                    return unavailable(0, beforePushConflicted);
+                    return unavailable(0, beforePushConflicted, oversized);
                 }
                 beforePush = await this.pull(serverUrl);
                 beforePushConflicted += beforePush.conflicted;
                 if (beforePush.unavailable || beforePush.historyUnavailable) {
-                    return unavailable(0, beforePushConflicted);
+                    return unavailable(0, beforePushConflicted, oversized);
                 }
             }
 
@@ -348,6 +352,7 @@ export class CreateSync {
                 return unavailable(
                     pushed.committed,
                     beforePushConflicted + pushed.conflicted,
+                    oversized,
                 );
             }
 
@@ -359,6 +364,7 @@ export class CreateSync {
                     beforePushConflicted +
                         pushed.conflicted +
                         afterPushConflicted,
+                    oversized,
                 );
             }
             if (afterPush.historyUnavailable) {
@@ -371,6 +377,7 @@ export class CreateSync {
                         beforePushConflicted +
                             pushed.conflicted +
                             afterPushConflicted,
+                        oversized,
                     );
                 }
                 afterPush = await this.pull(serverUrl);
@@ -381,6 +388,7 @@ export class CreateSync {
                         beforePushConflicted +
                             pushed.conflicted +
                             afterPushConflicted,
+                        oversized,
                     );
                 }
             }
@@ -391,6 +399,7 @@ export class CreateSync {
                     beforePushConflicted +
                     pushed.conflicted +
                     afterPushConflicted,
+                oversized,
                 offline: false,
                 vaultMismatch: false,
             };
@@ -399,25 +408,38 @@ export class CreateSync {
                 return {
                     committed: 0,
                     conflicted: 0,
+                    oversized,
                     offline: false,
                     vaultMismatch: true,
                 };
             }
 
             console.warn("VaultDatum synchronization failed", error);
-            return unavailable(0, 0);
+            return unavailable(0, 0, oversized);
         }
     }
 
     private async reconcileLocalVault(): Promise<{
         readonly conflicted: number;
+        readonly oversized: number;
     }> {
         const local = new Map<
             string,
             { readonly content: ArrayBuffer; readonly contentHash: string }
         >();
-        const paths = [...new Set(await this.localVault.listFiles())]
-            .filter(isSyncPath)
+        const localFiles = new Map<string, number>();
+        for (const file of await this.localVault.listFiles()) {
+            if (isSyncPath(file.path)) {
+                localFiles.set(file.path, file.size);
+            }
+        }
+        const oversizedPaths = new Set(
+            [...localFiles.entries()]
+                .filter(([, size]) => exceedsSyncContentLimit(size))
+                .map(([path]) => path),
+        );
+        const paths = [...localFiles.keys()]
+            .filter((path) => !oversizedPaths.has(path))
             .sort((left, right) => left.localeCompare(right));
 
         for (const path of paths) {
@@ -447,6 +469,18 @@ export class CreateSync {
                 (await this.store.hasConflict(replica.path)) ||
                 (await this.store.hasStoredOperationForPath(replica.path))
             ) {
+                continue;
+            }
+
+            if (oversizedPaths.has(replica.path)) {
+                if (
+                    await this.remoteApply.recordLocalContentTooLarge(
+                        replica.path,
+                        replica,
+                    )
+                ) {
+                    conflicted += 1;
+                }
                 continue;
             }
 
@@ -498,7 +532,7 @@ export class CreateSync {
             await this.captureModify(path, file.content);
         }
 
-        return { conflicted };
+        return { conflicted, oversized: oversizedPaths.size };
     }
 
     private async reconcileServerManifest(
@@ -877,10 +911,15 @@ function validateManifest(
     }
 }
 
-function unavailable(committed: number, conflicted: number): SyncSummary {
+function unavailable(
+    committed: number,
+    conflicted: number,
+    oversized = 0,
+): SyncSummary {
     return {
         committed,
         conflicted,
+        oversized,
         offline: true,
         vaultMismatch: false,
     };

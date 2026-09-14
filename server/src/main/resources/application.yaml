@@ -1,5 +1,6 @@
 vaultdatum:
   data-root: ${VAULTDATUM_DATA_ROOT:/data}
+  max-content-bytes: ${VAULTDATUM_MAX_CONTENT_BYTES:8388608}
 
 "%dev":
   vaultdatum:
@@ -14,6 +15,8 @@ quarkus:
     name: vaultdatum-server
   http:
     port: 8080
+    limits:
+      max-body-size: ${VAULTDATUM_MAX_REQUEST_BYTES:9M}
   datasource:
     db-kind: other
     jdbc:

@@ -2,9 +2,11 @@ package io.vaultdatum.server.api;
 
 import static io.restassured.RestAssured.given;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.hamcrest.Matchers.greaterThan;
 import static org.hamcrest.Matchers.is;
 
+import io.vaultdatum.server.config.ContentLimits;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.builder.MultiPartSpecBuilder;
 import io.restassured.response.Response;
@@ -16,6 +18,7 @@ import org.junit.jupiter.api.Test;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.util.Random;
 import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -25,6 +28,9 @@ class OperationResourceTest {
 
     @Inject
     DataDirectories dataDirectories;
+
+    @Inject
+    ContentLimits contentLimits;
 
     @Test
     void commitsCreatePersistsContentAndReplaysTheSameOperation() throws IOException {
@@ -117,6 +123,49 @@ class OperationResourceTest {
                 .statusCode(409)
                 .body("error.code", is("OPERATION_ID_REUSED"));
         assertFalse(Files.exists(dataDirectories.vault().resolve(secondPath)));
+    }
+
+    @Test
+    void storesAndReturnsBinaryAttachmentBytesWithoutTextEncoding() throws IOException {
+        String operationId = "OP-" + UUID.randomUUID();
+        String path = "attachments/" + UUID.randomUUID() + ".png";
+        byte[] content = new byte[512 * 1024];
+        new Random(42).nextBytes(content);
+
+        int revision = post(createRequest(operationId, path, content), content)
+                .then()
+                .statusCode(200)
+                .body("replayed", is(false))
+                .extract()
+                .path("resultRevision");
+
+        byte[] downloaded = given()
+                .queryParam("path", path)
+                .queryParam("revision", revision)
+                .queryParam("hash", ContentHash.calculate(content))
+                .when()
+                .get("/api/v1/content")
+                .then()
+                .statusCode(200)
+                .header("x-vaultdatum-content-hash", ContentHash.calculate(content))
+                .extract()
+                .asByteArray();
+
+        assertArrayEquals(content, downloaded);
+        assertArrayEquals(content, Files.readAllBytes(dataDirectories.vault().resolve(path)));
+    }
+
+    @Test
+    void rejectsContentOverTheConfiguredAttachmentLimit() throws IOException {
+        byte[] content = new byte[Math.toIntExact(contentLimits.maximumContentBytes() + 1)];
+        String path = "attachments/" + UUID.randomUUID() + ".bin";
+
+        post(createRequest("OP-" + UUID.randomUUID(), path, content), content)
+                .then()
+                .statusCode(413)
+                .body("error.code", is("CONTENT_TOO_LARGE"));
+
+        assertFalse(Files.exists(dataDirectories.vault().resolve(path)));
     }
 
     private static Response post(String metadata, byte[] content) {

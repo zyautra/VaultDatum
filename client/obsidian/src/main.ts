@@ -10,6 +10,10 @@ import {
     TFolder,
 } from "obsidian";
 
+import {
+    exceedsSyncContentLimit,
+    MAX_SYNC_CONTENT_BYTES,
+} from "./core/content-limits";
 import { ClientStore, type RemoteConflict } from "./storage/client-store";
 import { CreateSync, type SyncSummary } from "./sync/create-sync";
 import { NotificationChannel } from "./sync/notification-channel";
@@ -190,6 +194,14 @@ export default class VaultDatumPlugin extends Plugin {
         createSync: CreateSync,
         file: TFile,
     ): Promise<void> {
+        if (exceedsSyncContentLimit(file.stat.size)) {
+            new Notice(
+                `VaultDatum cannot sync ${file.path}: files must be ${maximumContentSizeLabel()} or smaller.`,
+            );
+            void this.syncNow(false);
+            return;
+        }
+
         try {
             const content = await this.app.vault.readBinary(file);
             const pending = await createSync.captureModify(file.path, content);
@@ -631,6 +643,12 @@ export default class VaultDatumPlugin extends Plugin {
             );
             return;
         }
+        if (summary.oversized > 0) {
+            new Notice(
+                `VaultDatum skipped ${summary.oversized} file(s) larger than ${maximumContentSizeLabel()}.`,
+            );
+            return;
+        }
         if (summary.offline) {
             new Notice(
                 "VaultDatum is offline or no server URL is configured. Pending work is kept locally.",
@@ -664,8 +682,18 @@ export default class VaultDatumPlugin extends Plugin {
 class ObsidianLocalVault implements LocalVault {
     public constructor(private readonly app: App) {}
 
-    public async listFiles(): Promise<readonly string[]> {
-        return this.app.vault.getFiles().map((file) => file.path);
+    public async listFiles(): Promise<
+        readonly { readonly path: string; readonly size: number }[]
+    > {
+        return this.app.vault
+            .getFiles()
+            .map((file) => ({ path: file.path, size: file.stat.size }));
+    }
+
+    public async fileSize(path: string): Promise<number | undefined> {
+        const file = this.app.vault.getAbstractFileByPath(path);
+
+        return file instanceof TFile ? file.stat.size : undefined;
     }
 
     public async readFile(path: string): Promise<ArrayBuffer | undefined> {
@@ -727,6 +755,10 @@ class ObsidianLocalVault implements LocalVault {
             }
         }
     }
+}
+
+function maximumContentSizeLabel(): string {
+    return `${MAX_SYNC_CONTENT_BYTES / (1024 * 1024)} MiB`;
 }
 
 class ConflictResolutionModal extends FuzzySuggestModal<RemoteConflict> {
