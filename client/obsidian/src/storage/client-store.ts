@@ -41,8 +41,19 @@ export interface PendingRename extends PendingOperationBase {
     readonly baseContentHash: string;
 }
 
+export interface PendingMove extends PendingOperationBase {
+    readonly type: "MOVE";
+    readonly destinationPath: string;
+    readonly baseRevision: number;
+    readonly baseContentHash: string;
+}
+
 export type PendingOperation =
-    PendingCreate | PendingModify | PendingDelete | PendingRename;
+    | PendingCreate
+    | PendingModify
+    | PendingDelete
+    | PendingRename
+    | PendingMove;
 export type ReplicaState = "PRESENT" | "DELETED";
 
 export interface ReplicaEntry {
@@ -215,7 +226,7 @@ export class ClientStore {
         const records = await this.pendingRecords();
         return records.find(
             (record) =>
-                record.path === path &&
+                affectsPath(record, path) &&
                 (record.status === "READY" || record.status === "IN_FLIGHT"),
         );
     }
@@ -225,7 +236,8 @@ export class ClientStore {
     ): Promise<PendingOperation | undefined> {
         const records = await this.pendingRecords();
         return records.find(
-            (record) => record.path === path && record.status !== "COMMITTED",
+            (record) =>
+                affectsPath(record, path) && record.status !== "COMMITTED",
         );
     }
 
@@ -268,7 +280,9 @@ export class ClientStore {
         await this.put(PENDING_STORE, pending);
     }
 
-    public async saveRename(pending: PendingRename): Promise<void> {
+    public async savePathChange(
+        pending: PendingRename | PendingMove,
+    ): Promise<void> {
         await this.put(PENDING_STORE, pending);
     }
 
@@ -417,9 +431,7 @@ export class ClientStore {
 
     public async hasStoredOperationForPath(path: string): Promise<boolean> {
         return (await this.pendingRecords()).some(
-            (record) =>
-                record.path === path ||
-                (record.type === "RENAME" && record.destinationPath === path),
+            (record) => affectsPath(record, path),
         );
     }
 
@@ -854,6 +866,14 @@ function isContentOperation(
     pending: PendingOperation,
 ): pending is PendingCreate | PendingModify {
     return pending.type === "CREATE" || pending.type === "MODIFY";
+}
+
+function affectsPath(pending: PendingOperation, path: string): boolean {
+    return (
+        pending.path === path ||
+        ((pending.type === "RENAME" || pending.type === "MOVE") &&
+            pending.destinationPath === path)
+    );
 }
 
 function openDatabase(databaseName: string): Promise<IDBDatabase> {

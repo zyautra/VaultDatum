@@ -8,10 +8,11 @@ import io.vaultdatum.server.sync.DeleteCoordinator;
 import io.vaultdatum.server.sync.DeleteOperation;
 import io.vaultdatum.server.sync.OperationIdReuseException;
 import io.vaultdatum.server.sync.OperationResult;
+import io.vaultdatum.server.sync.PathChangeType;
 import io.vaultdatum.server.sync.PresentBase;
 import io.vaultdatum.server.sync.RecoveryRequiredException;
-import io.vaultdatum.server.sync.RenameCoordinator;
-import io.vaultdatum.server.sync.RenameOperation;
+import io.vaultdatum.server.sync.PathChangeCoordinator;
+import io.vaultdatum.server.sync.PathChangeOperation;
 import io.vaultdatum.server.sync.RevisionNotificationPublisher;
 import io.vaultdatum.server.sync.SyncPath;
 import jakarta.ws.rs.Consumes;
@@ -30,18 +31,18 @@ public final class DeleteOperationResource {
 
     private final DeleteCoordinator deleteCoordinator;
 
-    private final RenameCoordinator renameCoordinator;
+    private final PathChangeCoordinator pathChangeCoordinator;
 
     private final RevisionNotificationPublisher notificationPublisher;
 
     public DeleteOperationResource(
             ObjectMapper objectMapper,
             DeleteCoordinator deleteCoordinator,
-            RenameCoordinator renameCoordinator,
+            PathChangeCoordinator pathChangeCoordinator,
             RevisionNotificationPublisher notificationPublisher) {
         this.objectMapper = objectMapper;
         this.deleteCoordinator = deleteCoordinator;
-        this.renameCoordinator = renameCoordinator;
+        this.pathChangeCoordinator = pathChangeCoordinator;
         this.notificationPublisher = notificationPublisher;
     }
 
@@ -51,8 +52,9 @@ public final class DeleteOperationResource {
             MetadataRequest request = parse(serializedOperation);
             OperationResult result = switch (request.type()) {
                 case "DELETE" -> deleteCoordinator.commit(deleteOperation(request));
-                case "RENAME" -> renameCoordinator.commit(renameOperation(request));
-                default -> throw new IllegalArgumentException("Only DELETE and RENAME metadata operations are supported");
+                case "RENAME" -> pathChangeCoordinator.commit(pathChangeOperation(request, PathChangeType.RENAME));
+                case "MOVE" -> pathChangeCoordinator.commit(pathChangeOperation(request, PathChangeType.MOVE));
+                default -> throw new IllegalArgumentException("Only DELETE, RENAME, and MOVE metadata operations are supported");
             };
             if (!result.replayed()) {
                 notificationPublisher.publish(result.resultRevision());
@@ -100,7 +102,7 @@ public final class DeleteOperationResource {
                 new PresentBase(request.base()[0].revision(), request.base()[0].contentHash()));
     }
 
-    private RenameOperation renameOperation(MetadataRequest request) {
+    private PathChangeOperation pathChangeOperation(MetadataRequest request, PathChangeType type) {
         if (request.base() == null || request.base().length != 2
                 || !"PRESENT".equals(request.base()[0].state())
                 || request.base()[0].revision() == null || request.base()[0].revision() < 1
@@ -108,7 +110,7 @@ public final class DeleteOperationResource {
                 || !request.base()[0].contentHash().matches("sha256:[0-9a-f]{64}")
                 || !"UNKNOWN".equals(request.base()[1].state())
                 || request.base()[1].revision() != null || request.base()[1].contentHash() != null) {
-            throw new IllegalArgumentException("A RENAME requires PRESENT source and UNKNOWN destination bases");
+            throw new IllegalArgumentException(type + " requires PRESENT source and UNKNOWN destination bases");
         }
         SyncPath source = SyncPath.parse(request.sourcePath());
         SyncPath destination = SyncPath.parse(request.destinationPath());
@@ -116,10 +118,10 @@ public final class DeleteOperationResource {
                 || request.operationId().isBlank() || request.clientId().isBlank()
                 || !source.value().equals(request.base()[0].path())
                 || !destination.value().equals(request.base()[1].path())) {
-            throw new IllegalArgumentException("RENAME metadata is invalid");
+            throw new IllegalArgumentException(type + " metadata is invalid");
         }
-        return new RenameOperation(
-                request.operationId(), request.clientId(), source, destination,
+        return new PathChangeOperation(
+                request.operationId(), request.clientId(), type, source, destination,
                 new PresentBase(request.base()[0].revision(), request.base()[0].contentHash()));
     }
 

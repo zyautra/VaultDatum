@@ -115,7 +115,7 @@ class ModifyAndDeleteOperationResourceTest {
     @Test
     void renamesAFileAsOneRevisionWithBothPathEffects() throws IOException {
         String sourcePath = "renames/" + UUID.randomUUID() + ".md";
-        String destinationPath = "archive/" + UUID.randomUUID() + ".md";
+        String destinationPath = "renames/" + UUID.randomUUID() + ".md";
         byte[] content = "Rename this content".getBytes(StandardCharsets.UTF_8);
         String contentHash = ContentHash.calculate(content);
         int sourceRevision = postContent(
@@ -156,6 +156,58 @@ class ModifyAndDeleteOperationResourceTest {
                 .then()
                 .statusCode(200)
                 .body("changes[0].type", is("RENAME"))
+                .body("changes[0].sourcePath", is(sourcePath))
+                .body("changes[0].destinationPath", is(destinationPath))
+                .body("changes[0].effects[0].path", is(sourcePath))
+                .body("changes[0].effects[0].state", is("DELETED"))
+                .body("changes[0].effects[1].path", is(destinationPath))
+                .body("changes[0].effects[1].contentHash", is(contentHash));
+    }
+
+    @Test
+    void movesAFileAsOneRevisionWithBothPathEffects() throws IOException {
+        String sourcePath = "moves/" + UUID.randomUUID() + ".md";
+        String destinationPath = "archive/" + UUID.randomUUID() + ".md";
+        byte[] content = "Move this content".getBytes(StandardCharsets.UTF_8);
+        String contentHash = ContentHash.calculate(content);
+        int sourceRevision = postContent(
+                createRequest("OP-" + UUID.randomUUID(), sourcePath, content), content)
+                .then()
+                .statusCode(200)
+                .extract()
+                .path("resultRevision");
+
+        String request = moveRequest(
+                "OP-" + UUID.randomUUID(), sourcePath, destinationPath, sourceRevision, contentHash);
+        int moveRevision = given()
+                .contentType("application/json")
+                .body(request)
+                .when().post("/api/v1/operations")
+                .then()
+                .statusCode(200)
+                .body("replayed", is(false))
+                .body("resultRevision", greaterThan(sourceRevision))
+                .extract()
+                .path("resultRevision");
+
+        assertFalse(Files.exists(dataDirectories.vault().resolve(sourcePath)));
+        assertEquals("Move this content", Files.readString(dataDirectories.vault().resolve(destinationPath)));
+
+        given()
+                .contentType("application/json")
+                .body(request)
+                .when().post("/api/v1/operations")
+                .then()
+                .statusCode(200)
+                .body("resultRevision", is(moveRevision))
+                .body("replayed", is(true));
+
+        given()
+                .queryParam("after", sourceRevision)
+                .when().get("/api/v1/changes")
+                .then()
+                .statusCode(200)
+                .body("changes[0].type", is("MOVE"))
                 .body("changes[0].sourcePath", is(sourcePath))
                 .body("changes[0].destinationPath", is(destinationPath))
                 .body("changes[0].effects[0].path", is(sourcePath))
@@ -263,10 +315,32 @@ class ModifyAndDeleteOperationResourceTest {
             String destinationPath,
             int sourceRevision,
             String sourceHash) {
+        return pathChangeRequest(
+                operationId, "RENAME", sourcePath, destinationPath, sourceRevision, sourceHash);
+    }
+
+    private static String moveRequest(
+            String operationId,
+            String sourcePath,
+            String destinationPath,
+            int sourceRevision,
+            String sourceHash) {
+        return pathChangeRequest(
+                operationId, "MOVE", sourcePath, destinationPath, sourceRevision, sourceHash);
+    }
+
+    private static String pathChangeRequest(
+            String operationId,
+            String type,
+            String sourcePath,
+            String destinationPath,
+            int sourceRevision,
+            String sourceHash) {
         return """
-                {"operationId":"%s","clientId":"mutation-client","type":"RENAME","sourcePath":"%s","destinationPath":"%s","base":[{"path":"%s","state":"PRESENT","revision":%d,"contentHash":"%s"},{"path":"%s","state":"UNKNOWN"}]}
+                {"operationId":"%s","clientId":"mutation-client","type":"%s","sourcePath":"%s","destinationPath":"%s","base":[{"path":"%s","state":"PRESENT","revision":%d,"contentHash":"%s"},{"path":"%s","state":"UNKNOWN"}]}
                 """.formatted(
                 operationId,
+                type,
                 sourcePath,
                 destinationPath,
                 sourcePath,

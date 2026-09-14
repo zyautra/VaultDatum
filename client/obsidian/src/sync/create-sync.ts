@@ -6,6 +6,7 @@ import {
     type LocalScanBaseline,
     type PendingCreate,
     type PendingDelete,
+    type PendingMove,
     type PendingModify,
     type PendingOperation,
     type PendingRename,
@@ -113,10 +114,10 @@ export class CreateSync {
         return pending;
     }
 
-    public async captureRename(
+    public async capturePathChange(
         sourcePath: string,
         destinationPath: string,
-    ): Promise<PendingRename | undefined> {
+    ): Promise<PendingRename | PendingMove | undefined> {
         if (
             !isSyncPath(sourcePath) ||
             !isSyncPath(destinationPath) ||
@@ -138,18 +139,31 @@ export class CreateSync {
             return undefined;
         }
 
-        const pending: PendingRename = {
-            operationId: `OP-${crypto.randomUUID()}`,
-            clientId: await this.store.clientId(),
-            type: "RENAME",
-            path: sourcePath,
-            destinationPath,
-            baseRevision: source.revision,
-            baseContentHash: source.contentHash,
-            createdAt: new Date().toISOString(),
-            status: "READY",
-        };
-        await this.store.saveRename(pending);
+        const pending =
+            parentPath(sourcePath) === parentPath(destinationPath)
+                ? ({
+                      operationId: `OP-${crypto.randomUUID()}`,
+                      clientId: await this.store.clientId(),
+                      type: "RENAME",
+                      path: sourcePath,
+                      destinationPath,
+                      baseRevision: source.revision,
+                      baseContentHash: source.contentHash,
+                      createdAt: new Date().toISOString(),
+                      status: "READY",
+                  } satisfies PendingRename)
+                : ({
+                      operationId: `OP-${crypto.randomUUID()}`,
+                      clientId: await this.store.clientId(),
+                      type: "MOVE",
+                      path: sourcePath,
+                      destinationPath,
+                      baseRevision: source.revision,
+                      baseContentHash: source.contentHash,
+                      createdAt: new Date().toISOString(),
+                      status: "READY",
+                  } satisfies PendingMove);
+        await this.store.savePathChange(pending);
         return pending;
     }
 
@@ -254,7 +268,7 @@ export class CreateSync {
             if (active.type === "DELETE") {
                 return active;
             }
-            if (active.type === "RENAME") {
+            if (active.type === "RENAME" || active.type === "MOVE") {
                 return active;
             }
             const updated = {
@@ -828,6 +842,9 @@ export class CreateSync {
         if (pending.type === "RENAME") {
             return this.serverClient.submitRename(serverUrl, pending);
         }
+        if (pending.type === "MOVE") {
+            return this.serverClient.submitMove(serverUrl, pending);
+        }
 
         const artifact = await this.store.artifact(pending.artifactId);
         if (artifact === undefined) {
@@ -868,6 +885,11 @@ function isPresentFile(
         entry.contentHash !== undefined &&
         entry.size !== undefined
     );
+}
+
+function parentPath(path: string): string {
+    const separator = path.lastIndexOf("/");
+    return separator < 0 ? "" : path.slice(0, separator);
 }
 
 function latestPathEffects(changes: readonly RemoteChange[]): RemoteChange[] {

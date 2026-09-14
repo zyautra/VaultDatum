@@ -40,13 +40,14 @@ jobs:
           --no-daemon
       - run: docker build -f server/src/main/docker/Dockerfile.native -t vaultdatum-server:native-test server
       - run: docker run --detach --rm --name vaultdatum-native-test -p 18080:8080 vaultdatum-server:native-test
-      - run: curl --fail --retry 10 --retry-connrefused --retry-delay 1 http://127.0.0.1:18080/health
+      - run: curl --fail --retry 10 --retry-all-errors --retry-connrefused --retry-delay 1 http://127.0.0.1:18080/health
       - name: Verify a native mutation round trip and retry
         run: |
           smoke_directory="$(mktemp -d)"
           trap 'rm -rf "$smoke_directory"' EXIT
           content_path="$smoke_directory/content.md"
           metadata_path="$smoke_directory/operation.json"
+          move_metadata_path="$smoke_directory/move.json"
           downloaded_path="$smoke_directory/downloaded.md"
           printf 'Native container synchronization smoke test\n' > "$content_path"
           content_hash="sha256:$(sha256sum "$content_path" | awk '{print $1}')"
@@ -73,6 +74,29 @@ jobs:
             http://127.0.0.1:18080/api/v1/operations)"
           printf '%s' "$replay" | grep -q '"replayed":true'
           printf '%s' "$replay" | grep -q "\"resultRevision\":$revision"
+          printf '%s\n' \
+            "{\"operationId\":\"OP-native-ci-move\",\"clientId\":\"C-native-ci\",\"type\":\"MOVE\",\"sourcePath\":\"smoke/native.md\",\"destinationPath\":\"smoke/moved.md\",\"base\":[{\"path\":\"smoke/native.md\",\"state\":\"PRESENT\",\"revision\":$revision,\"contentHash\":\"$content_hash\"},{\"path\":\"smoke/moved.md\",\"state\":\"UNKNOWN\"}]}" \
+            > "$move_metadata_path"
+          move_response="$(curl --fail --silent --show-error \
+            --header 'Content-Type: application/json' \
+            --data-binary "@$move_metadata_path" \
+            http://127.0.0.1:18080/api/v1/operations)"
+          move_revision="$(printf '%s' "$move_response" | sed -n 's/.*"resultRevision":\([0-9][0-9]*\).*/\1/p')"
+          test -n "$move_revision"
+          printf '%s' "$move_response" | grep -q '"replayed":false'
+          curl --fail --silent --show-error --get \
+            --data-urlencode 'path=smoke/moved.md' \
+            --data-urlencode "revision=$move_revision" \
+            --data-urlencode "hash=$content_hash" \
+            --output "$downloaded_path" \
+            http://127.0.0.1:18080/api/v1/content
+          cmp "$content_path" "$downloaded_path"
+          move_replay="$(curl --fail --silent --show-error \
+            --header 'Content-Type: application/json' \
+            --data-binary "@$move_metadata_path" \
+            http://127.0.0.1:18080/api/v1/operations)"
+          printf '%s' "$move_replay" | grep -q '"replayed":true'
+          printf '%s' "$move_replay" | grep -q "\"resultRevision\":$move_revision"
       - if: always()
         run: docker stop vaultdatum-native-test || true
 

@@ -10,6 +10,7 @@ import {
     type ManualMergeResolution,
     type PendingCreate,
     type PendingDelete,
+    type PendingMove,
     type PendingModify,
     type PendingRename,
 } from "../src/storage/client-store";
@@ -869,7 +870,7 @@ async function queuesModifyThenDeleteAgainstTheSameReplicaBase(): Promise<void> 
 
 async function queuesAndObservesAnOwnRenameAsOneOperation(): Promise<void> {
     const sourcePath = "notes/rename-source.md";
-    const destinationPath = "archive/rename-destination.md";
+    const destinationPath = "notes/rename-destination.md";
     const content = bytes("Rename this local file");
     const hash = await contentHash(content);
     const store = await ClientStore.open(
@@ -887,7 +888,7 @@ async function queuesAndObservesAnOwnRenameAsOneOperation(): Promise<void> {
     });
     const sync = new CreateSync(store, new NoopTransport(), vault, () => "");
 
-    const pending = await sync.captureRename(sourcePath, destinationPath);
+    const pending = await sync.capturePathChange(sourcePath, destinationPath);
 
     assert.equal(pending?.type, "RENAME");
     if (pending?.type !== "RENAME") {
@@ -922,6 +923,99 @@ async function queuesAndObservesAnOwnRenameAsOneOperation(): Promise<void> {
     assert.equal(await store.operation(pending.operationId), undefined);
     assert.equal((await store.replica(sourcePath))?.state, "DELETED");
     assert.equal((await store.replica(destinationPath))?.contentHash, hash);
+    store.close();
+}
+
+async function queuesAndObservesAnOwnMoveAsOneOperation(): Promise<void> {
+    const sourcePath = "notes/move-source.md";
+    const destinationPath = "archive/move-destination.md";
+    const content = bytes("Move this local file");
+    const hash = await contentHash(content);
+    const store = await ClientStore.open(
+        `test-local-move-${crypto.randomUUID()}`,
+    );
+    const vault = new MemoryVault();
+    await vault.writeFile(sourcePath, content);
+    await store.putReplica({
+        path: sourcePath,
+        entryType: "FILE",
+        state: "PRESENT",
+        revision: 8,
+        contentHash: hash,
+        size: content.byteLength,
+    });
+    const sync = new CreateSync(store, new NoopTransport(), vault, () => "");
+
+    const pending = await sync.capturePathChange(sourcePath, destinationPath);
+
+    assert.equal(pending?.type, "MOVE");
+    if (pending?.type !== "MOVE") {
+        throw new Error("Expected a pending MOVE operation");
+    }
+    assert.equal(pending.path, sourcePath);
+    assert.equal(pending.destinationPath, destinationPath);
+    assert.equal(pending.baseRevision, 8);
+    assert.equal(pending.baseContentHash, hash);
+
+    await vault.removeFile(sourcePath);
+    await vault.writeFile(destinationPath, content);
+    const apply = new RemoteApply(store, new DownloadTransport(content), vault);
+    const result = await apply.integrateChange("https://vaultdatum.test", {
+        revision: 9,
+        type: "MOVE",
+        operationId: pending.operationId,
+        actor: { type: "CLIENT", clientId: pending.clientId },
+        effects: [
+            { path: sourcePath, entryType: "FILE", state: "DELETED" },
+            {
+                path: destinationPath,
+                entryType: "FILE",
+                state: "PRESENT",
+                contentHash: hash,
+                size: content.byteLength,
+            },
+        ],
+    });
+
+    assert.equal(result.conflicted, 0);
+    assert.equal(await store.operation(pending.operationId), undefined);
+    assert.equal((await store.replica(sourcePath))?.state, "DELETED");
+    assert.equal((await store.replica(destinationPath))?.contentHash, hash);
+    store.close();
+}
+
+async function reservesBothPathsWhileAMoveIsPending(): Promise<void> {
+    const sourcePath = "notes/pending-move-source.md";
+    const destinationPath = "archive/pending-move-destination.md";
+    const store = await ClientStore.open(
+        `test-pending-move-paths-${crypto.randomUUID()}`,
+    );
+    const pending: PendingMove = {
+        operationId: `OP-${crypto.randomUUID()}`,
+        clientId: "C-pending-move",
+        type: "MOVE",
+        path: sourcePath,
+        destinationPath,
+        baseRevision: 4,
+        baseContentHash: await contentHash(bytes("Base content")),
+        createdAt: new Date().toISOString(),
+        status: "READY",
+    };
+    await store.savePathChange(pending);
+
+    assert.equal(
+        (await store.findActiveOperation(sourcePath))?.operationId,
+        pending.operationId,
+    );
+    assert.equal(
+        (await store.findActiveOperation(destinationPath))?.operationId,
+        pending.operationId,
+    );
+    assert.equal(
+        (await store.pendingForPath(destinationPath))?.operationId,
+        pending.operationId,
+    );
+    assert.equal(await store.hasStoredOperationForPath(destinationPath), true);
     store.close();
 }
 
@@ -1773,6 +1867,15 @@ class NoopTransport implements SyncTransport {
         void pending;
         return { kind: "UNAVAILABLE" };
     }
+
+    public async submitMove(
+        serverUrl: string,
+        pending: PendingMove,
+    ): Promise<SubmitOperationResult> {
+        void serverUrl;
+        void pending;
+        return { kind: "UNAVAILABLE" };
+    }
 }
 
 class HistoryTransport extends DownloadTransport implements SyncTransport {
@@ -1890,6 +1993,15 @@ class HistoryTransport extends DownloadTransport implements SyncTransport {
     public async submitRename(
         serverUrl: string,
         pending: PendingRename,
+    ): Promise<SubmitOperationResult> {
+        void serverUrl;
+        void pending;
+        return { kind: "UNAVAILABLE" };
+    }
+
+    public async submitMove(
+        serverUrl: string,
+        pending: PendingMove,
     ): Promise<SubmitOperationResult> {
         void serverUrl;
         void pending;
@@ -2449,6 +2561,8 @@ await preservesAnOfflineModificationWhenTheServerDeletesItsBase();
 await excludesObsidianConfigurationFromEventsAndReconciliation();
 await queuesModifyThenDeleteAgainstTheSameReplicaBase();
 await queuesAndObservesAnOwnRenameAsOneOperation();
+await queuesAndObservesAnOwnMoveAsOneOperation();
+await reservesBothPathsWhileAMoveIsPending();
 await isolatesBothPathsWhenARemoteRenameOverlapsLocalContent();
 await pullsTheLatestContentAfterAnOwnIntermediateChange();
 await retriesAnInFlightCreateAfterAStoreRestart();

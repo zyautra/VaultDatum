@@ -24,18 +24,18 @@ import java.nio.file.StandardOpenOption;
 import java.time.Instant;
 
 @ApplicationScoped
-public final class RenameCoordinator {
+public final class PathChangeCoordinator {
 
     private final DataDirectories dataDirectories;
 
     private final DSLContext dsl;
 
-    public RenameCoordinator(DataDirectories dataDirectories, DSLContext dsl) {
+    public PathChangeCoordinator(DataDirectories dataDirectories, DSLContext dsl) {
         this.dataDirectories = dataDirectories;
         this.dsl = dsl;
     }
 
-    public OperationResult commit(RenameOperation operation) {
+    public OperationResult commit(PathChangeOperation operation) {
         synchronized (MutationLock.INSTANCE) {
             OperationResult replayed = existingResult(operation);
             if (replayed != null) {
@@ -47,13 +47,14 @@ public final class RenameCoordinator {
         }
     }
 
-    public void recoverPreparedRenames() {
+    public void recoverPreparedPathChanges() {
         synchronized (MutationLock.INSTANCE) {
             Operations operations = OPERATIONS.as("operations");
             OperationRename renames = OPERATION_RENAME.as("operation_rename");
             var prepared = dsl.select(
                             operations.OPERATION_ID,
                             operations.ACTOR_CLIENT_ID,
+                            operations.OPERATION_TYPE,
                             operations.REQUEST_DIGEST,
                             renames.SOURCE_PATH,
                             renames.DESTINATION_PATH,
@@ -64,14 +65,15 @@ public final class RenameCoordinator {
                     .join(OPERATION_BASE_CONDITION)
                     .on(OPERATION_BASE_CONDITION.OPERATION_ID.eq(operations.OPERATION_ID))
                     .where(operations.STATUS.eq("PREPARED"))
-                    .and(operations.OPERATION_TYPE.eq("RENAME"))
+                    .and(operations.OPERATION_TYPE.in("RENAME", "MOVE"))
                     .and(OPERATION_BASE_CONDITION.ORDINAL.eq(0))
                     .fetch();
 
             for (var record : prepared) {
-                RenameOperation operation = new RenameOperation(
+                PathChangeOperation operation = new PathChangeOperation(
                         record.get(operations.OPERATION_ID),
                         record.get(operations.ACTOR_CLIENT_ID),
+                        PathChangeType.valueOf(record.get(operations.OPERATION_TYPE)),
                         SyncPath.parse(record.get(renames.SOURCE_PATH)),
                         SyncPath.parse(record.get(renames.DESTINATION_PATH)),
                         new PresentBase(
@@ -84,7 +86,7 @@ public final class RenameCoordinator {
         }
     }
 
-    private OperationResult existingResult(RenameOperation operation) {
+    private OperationResult existingResult(PathChangeOperation operation) {
         var record = dsl.select(OPERATIONS.STATUS, OPERATIONS.RESULT_REVISION, OPERATIONS.REQUEST_DIGEST)
                 .from(OPERATIONS)
                 .where(OPERATIONS.OPERATION_ID.eq(operation.operationId()))
@@ -99,7 +101,7 @@ public final class RenameCoordinator {
         return new OperationResult(operation.operationId(), record.get(OPERATIONS.RESULT_REVISION), true);
     }
 
-    private void prepare(RenameOperation operation) {
+    private void prepare(PathChangeOperation operation) {
         dsl.transaction(configuration -> {
             DSLContext transaction = DSL.using(configuration);
             var source = transaction.select(
@@ -131,7 +133,7 @@ public final class RenameCoordinator {
                     .values(
                             operation.operationId(),
                             operation.clientId(),
-                            "RENAME",
+                            operation.type().name(),
                             requestDigest(operation),
                             "PREPARED",
                             Instant.now().toString())
@@ -167,7 +169,7 @@ public final class RenameCoordinator {
         });
     }
 
-    private void apply(RenameOperation operation) {
+    private void apply(PathChangeOperation operation) {
         Path source = operation.sourcePath().resolveUnder(dataDirectories.vault());
         Path destination = operation.destinationPath().resolveUnder(dataDirectories.vault());
         if (matches(operation.sourceBase().contentHash(), destination) && !Files.exists(source)) {
@@ -186,7 +188,7 @@ public final class RenameCoordinator {
         }
     }
 
-    private OperationResult finalize(RenameOperation operation) {
+    private OperationResult finalize(PathChangeOperation operation) {
         return dsl.transactionResult(configuration -> {
             DSLContext transaction = DSL.using(configuration);
             var source = transaction.select(PATH_STATE.SIZE)
@@ -218,7 +220,7 @@ public final class RenameCoordinator {
                     .columns(CHANGE_JOURNAL.REVISION, CHANGE_JOURNAL.OPERATION_ID, CHANGE_JOURNAL.CHANGE_TYPE,
                             CHANGE_JOURNAL.ACTOR_TYPE, CHANGE_JOURNAL.ACTOR_CLIENT_ID,
                             CHANGE_JOURNAL.SOURCE_PATH, CHANGE_JOURNAL.DESTINATION_PATH, CHANGE_JOURNAL.COMMITTED_AT)
-                    .values(revision, operation.operationId(), "RENAME", "CLIENT", operation.clientId(),
+                    .values(revision, operation.operationId(), operation.type().name(), "CLIENT", operation.clientId(),
                             operation.sourcePath().value(), operation.destinationPath().value(), Instant.now().toString())
                     .execute();
             transaction.insertInto(CHANGE_EFFECT)
@@ -257,17 +259,20 @@ public final class RenameCoordinator {
         return revision;
     }
 
-    private void requireMatchingDigest(RenameOperation operation, String storedDigest) {
+    private void requireMatchingDigest(PathChangeOperation operation, String storedDigest) {
         if (!requestDigest(operation).equals(storedDigest)) {
             throw new OperationIdReuseException(operation.operationId());
         }
     }
 
-    private static String requestDigest(RenameOperation operation) {
-        return ContentHash.calculateUtf8(String.join("\u0000",
+    private static String requestDigest(PathChangeOperation operation) {
+        String request = String.join("\u0000",
                 operation.operationId(), operation.clientId(), operation.sourcePath().value(),
                 operation.destinationPath().value(), Long.toString(operation.sourceBase().revision()),
-                operation.sourceBase().contentHash(), "UNKNOWN"));
+                operation.sourceBase().contentHash(), "UNKNOWN");
+        return operation.type() == PathChangeType.RENAME
+                ? ContentHash.calculateUtf8(request)
+                : ContentHash.calculateUtf8(request + "\u0000" + operation.type().name());
     }
 
     private static boolean matches(String expectedHash, Path file) {

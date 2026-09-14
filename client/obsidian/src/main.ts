@@ -184,7 +184,7 @@ export default class VaultDatumPlugin extends Plugin {
                 }
 
                 this.captureQueue = this.captureQueue.then(() =>
-                    this.captureRenamedFile(createSync, oldPath, file.path),
+                    this.capturePathChange(createSync, oldPath, file.path),
                 );
             }),
         );
@@ -239,13 +239,13 @@ export default class VaultDatumPlugin extends Plugin {
         }
     }
 
-    private async captureRenamedFile(
+    private async capturePathChange(
         createSync: CreateSync,
         sourcePath: string,
         destinationPath: string,
     ): Promise<void> {
         try {
-            const pending = await createSync.captureRename(
+            const pending = await createSync.capturePathChange(
                 sourcePath,
                 destinationPath,
             );

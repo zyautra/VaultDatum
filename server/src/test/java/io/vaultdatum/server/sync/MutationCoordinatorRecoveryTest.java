@@ -45,7 +45,7 @@ class MutationCoordinatorRecoveryTest {
     DeleteCoordinator deleteCoordinator;
 
     @Inject
-    RenameCoordinator renameCoordinator;
+    PathChangeCoordinator pathChangeCoordinator;
 
     @Test
     void recoversPreparedModifyBeforeAndAfterFilesystemApply() throws IOException {
@@ -121,7 +121,7 @@ class MutationCoordinatorRecoveryTest {
                 beforeSource, beforeDestination, beforeRevision, beforeContent);
         insertPreparedRename(before);
 
-        renameCoordinator.recoverPreparedRenames();
+        pathChangeCoordinator.recoverPreparedPathChanges();
 
         assertFalse(Files.exists(vaultPath(before.sourcePath())));
         assertEquals(beforeContent, Files.readString(vaultPath(before.destinationPath())));
@@ -140,11 +140,28 @@ class MutationCoordinatorRecoveryTest {
                 StandardCopyOption.ATOMIC_MOVE);
         insertPreparedRename(after);
 
-        renameCoordinator.recoverPreparedRenames();
+        pathChangeCoordinator.recoverPreparedPathChanges();
 
         assertFalse(Files.exists(vaultPath(after.sourcePath())));
         assertEquals(afterContent, Files.readString(vaultPath(after.destinationPath())));
         assertCommittedAfter(after.operationId(), afterRevision);
+    }
+
+    @Test
+    void recoversPreparedMoveBeforeFilesystemApply() throws IOException {
+        String sourcePath = path("move-source");
+        String destinationPath = "archive/move-destination-" + UUID.randomUUID() + ".md";
+        String content = "Move source before filesystem apply";
+        long sourceRevision = createSource(sourcePath, content);
+        PreparedRename prepared = preparedRename(
+                sourcePath, destinationPath, sourceRevision, content, PathChangeType.MOVE);
+        insertPreparedRename(prepared);
+
+        pathChangeCoordinator.recoverPreparedPathChanges();
+
+        assertFalse(Files.exists(vaultPath(sourcePath)));
+        assertEquals(content, Files.readString(vaultPath(destinationPath)));
+        assertCommittedAfter(prepared.operationId(), sourceRevision);
     }
 
     private long createSource(String path, String content) throws IOException {
@@ -190,12 +207,23 @@ class MutationCoordinatorRecoveryTest {
             String destinationPath,
             long sourceRevision,
             String content) {
+        return preparedRename(
+                sourcePath, destinationPath, sourceRevision, content, PathChangeType.RENAME);
+    }
+
+    private PreparedRename preparedRename(
+            String sourcePath,
+            String destinationPath,
+            long sourceRevision,
+            String content,
+            PathChangeType type) {
         return new PreparedRename(
                 operationId(),
                 sourcePath,
                 destinationPath,
                 sourceRevision,
-                ContentHash.calculate(content.getBytes(StandardCharsets.UTF_8)));
+                ContentHash.calculate(content.getBytes(StandardCharsets.UTF_8)),
+                type);
     }
 
     private Path writeStaged(String reference, String content) throws IOException {
@@ -319,7 +347,7 @@ class MutationCoordinatorRecoveryTest {
     }
 
     private void insertPreparedRename(PreparedRename prepared) {
-        String requestDigest = ContentHash.calculateUtf8(String.join(
+        String request = String.join(
                 "\u0000",
                 prepared.operationId(),
                 CLIENT_ID,
@@ -327,7 +355,10 @@ class MutationCoordinatorRecoveryTest {
                 prepared.destinationPath(),
                 Long.toString(prepared.sourceRevision()),
                 prepared.sourceHash(),
-                "UNKNOWN"));
+                "UNKNOWN");
+        String requestDigest = prepared.type() == PathChangeType.RENAME
+                ? ContentHash.calculateUtf8(request)
+                : ContentHash.calculateUtf8(request + "\u0000" + prepared.type().name());
         dsl.transaction(configuration -> {
             DSLContext transaction = DSL.using(configuration);
             transaction.insertInto(OPERATIONS)
@@ -341,7 +372,7 @@ class MutationCoordinatorRecoveryTest {
                     .values(
                             prepared.operationId(),
                             CLIENT_ID,
-                            "RENAME",
+                            prepared.type().name(),
                             requestDigest,
                             "PREPARED",
                             Instant.now().toString())
@@ -435,6 +466,7 @@ class MutationCoordinatorRecoveryTest {
             String sourcePath,
             String destinationPath,
             long sourceRevision,
-            String sourceHash) {
+            String sourceHash,
+            PathChangeType type) {
     }
 }

@@ -5,6 +5,7 @@ import type { components } from "./generated/protocol";
 import type {
     PendingCreate,
     PendingDelete,
+    PendingMove,
     PendingModify,
     PendingRename,
 } from "../storage/client-store";
@@ -125,6 +126,10 @@ export interface SyncTransport extends ContentTransport {
     submitRename(
         serverUrl: string,
         pending: PendingRename,
+    ): Promise<SubmitOperationResult>;
+    submitMove(
+        serverUrl: string,
+        pending: PendingMove,
     ): Promise<SubmitOperationResult>;
 }
 
@@ -300,22 +305,47 @@ export class ServerClient implements SyncTransport {
         serverUrl: string,
         pending: PendingRename,
     ): Promise<SubmitOperationResult> {
-        const metadata = {
-            operationId: pending.operationId,
-            clientId: pending.clientId,
-            type: "RENAME" as const,
-            sourcePath: pending.path,
-            destinationPath: pending.destinationPath,
-            base: [
-                {
-                    path: pending.path,
-                    state: "PRESENT" as const,
-                    revision: pending.baseRevision,
-                    contentHash: pending.baseContentHash,
-                },
-                { path: pending.destinationPath, state: "UNKNOWN" as const },
-            ],
-        } satisfies components["schemas"]["RenameOperationRequest"];
+        return this.submitPathChange(serverUrl, pending);
+    }
+
+    public async submitMove(
+        serverUrl: string,
+        pending: PendingMove,
+    ): Promise<SubmitOperationResult> {
+        return this.submitPathChange(serverUrl, pending);
+    }
+
+    private async submitPathChange(
+        serverUrl: string,
+        pending: PendingRename | PendingMove,
+    ): Promise<SubmitOperationResult> {
+        const base = [
+            {
+                path: pending.path,
+                state: "PRESENT" as const,
+                revision: pending.baseRevision,
+                contentHash: pending.baseContentHash,
+            },
+            { path: pending.destinationPath, state: "UNKNOWN" as const },
+        ];
+        const metadata =
+            pending.type === "RENAME"
+                ? ({
+                      operationId: pending.operationId,
+                      clientId: pending.clientId,
+                      type: "RENAME",
+                      sourcePath: pending.path,
+                      destinationPath: pending.destinationPath,
+                      base,
+                  } satisfies components["schemas"]["RenameOperationRequest"])
+                : ({
+                      operationId: pending.operationId,
+                      clientId: pending.clientId,
+                      type: "MOVE",
+                      sourcePath: pending.path,
+                      destinationPath: pending.destinationPath,
+                      base,
+                  } satisfies components["schemas"]["MoveOperationRequest"]);
         const response = await requestUrl({
             url: `${serverUrl}/api/v1/operations`,
             method: "POST",

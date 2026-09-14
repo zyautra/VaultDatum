@@ -47,10 +47,11 @@ idempotently replayed if its response was lost.
 ## Current Sync Slice
 
 The Obsidian plugin has a **Server URL** setting. After the plugin has started,
-a new, modified, deleted, or renamed file outside `.obsidian/` is captured as
+a new, modified, deleted, renamed, or moved file outside `.obsidian/` is captured as
 a durable operation before it is eligible for upload. MODIFY and DELETE retain
-the last replicated revision and content hash as their base condition. RENAME
-uses a PRESENT source base and an UNKNOWN destination base, then commits both
+the last replicated revision and content hash as their base condition. A
+same-directory path change is a RENAME; a change of parent directory is a MOVE.
+Both use a PRESENT source base and an UNKNOWN destination base, then commit both
 path effects at one server revision. The same stored snapshot and operation ID
 are retried after an interrupted request or a plugin restart. A server commit
 removes a local content artifact, but retains a lightweight committed operation
@@ -95,11 +96,11 @@ latest revision and schedules an ordinary pull-based sync; it never carries
 Vault content or becomes a correctness dependency. Lost, duplicated, or
 delayed notifications therefore do not change synchronization results.
 
-This slice does not yet import an existing Vault, synchronize MOVE operations,
-or restore a locally recreated tombstoned path. RENAME changes are applied only
-when both source and destination paths are safe; a divergent local source or
-destination becomes a durable conflict and neither remote effect overwrites
-local content. The **Resolve conflict: use Server** command lets a user
+This slice does not yet import an existing Vault or restore a locally recreated
+tombstoned path. RENAME and MOVE changes are applied only when both source and
+destination paths are safe; a divergent local source or destination becomes a
+durable conflict and neither remote effect overwrites local content. The
+**Resolve conflict: use Server** command lets a user
 explicitly replace one conflicted local file with the latest Server version.
 **Resolve conflict: apply Local** turns a conflicted local file into a new
 MODIFY operation against that latest Server version. **Resolve conflict: keep

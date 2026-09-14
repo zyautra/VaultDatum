@@ -79,7 +79,10 @@ export class RemoteApply {
     ): Promise<RemoteIntegration> {
         const submitted = await this.store.operation(change.operationId);
 
-        if (submitted?.type === "RENAME" && isOwnChange(change, submitted)) {
+        if (
+            (submitted?.type === "RENAME" || submitted?.type === "MOVE") &&
+            isOwnChange(change, submitted)
+        ) {
             return this.integrateOwnRename(change, submitted);
         }
         if (change.type === "RENAME" || change.type === "MOVE") {
