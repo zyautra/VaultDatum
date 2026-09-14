@@ -82,6 +82,12 @@ it finalizes an already-applied result, resumes a staged safe write, discards an
 unstaged intent for a later retry, or preserves an unexpected local state as a
 conflict.
 
+The plugin also keeps a best-effort WebSocket connection to
+`/api/v1/notifications`. A `REVISION_ADVANCED` message contains only the
+latest revision and schedules an ordinary pull-based sync; it never carries
+Vault content or becomes a correctness dependency. Lost, duplicated, or
+delayed notifications therefore do not change synchronization results.
+
 This slice does not yet import an existing Vault, synchronize MOVE operations,
 or restore a locally recreated tombstoned path. RENAME changes are applied only
 when both source and destination paths are safe; a divergent local source or

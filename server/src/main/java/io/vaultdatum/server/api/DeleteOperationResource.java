@@ -12,6 +12,7 @@ import io.vaultdatum.server.sync.PresentBase;
 import io.vaultdatum.server.sync.RecoveryRequiredException;
 import io.vaultdatum.server.sync.RenameCoordinator;
 import io.vaultdatum.server.sync.RenameOperation;
+import io.vaultdatum.server.sync.RevisionNotificationPublisher;
 import io.vaultdatum.server.sync.SyncPath;
 import jakarta.ws.rs.Consumes;
 import jakarta.ws.rs.POST;
@@ -31,13 +32,17 @@ public final class DeleteOperationResource {
 
     private final RenameCoordinator renameCoordinator;
 
+    private final RevisionNotificationPublisher notificationPublisher;
+
     public DeleteOperationResource(
             ObjectMapper objectMapper,
             DeleteCoordinator deleteCoordinator,
-            RenameCoordinator renameCoordinator) {
+            RenameCoordinator renameCoordinator,
+            RevisionNotificationPublisher notificationPublisher) {
         this.objectMapper = objectMapper;
         this.deleteCoordinator = deleteCoordinator;
         this.renameCoordinator = renameCoordinator;
+        this.notificationPublisher = notificationPublisher;
     }
 
     @POST
@@ -49,6 +54,9 @@ public final class DeleteOperationResource {
                 case "RENAME" -> renameCoordinator.commit(renameOperation(request));
                 default -> throw new IllegalArgumentException("Only DELETE and RENAME metadata operations are supported");
             };
+            if (!result.replayed()) {
+                notificationPublisher.publish(result.resultRevision());
+            }
             return Response.ok(new OperationResource.OperationResultResponse(
                     result.operationId(), "COMMITTED", result.resultRevision(), result.replayed())).build();
         } catch (IllegalArgumentException exception) {

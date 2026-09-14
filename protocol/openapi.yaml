@@ -11,6 +11,7 @@ servers:
 tags:
   - name: System
   - name: Synchronization
+  - name: Realtime
 paths:
   /health:
     get:
@@ -44,6 +45,28 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "503":
           $ref: "#/components/responses/ServerUnavailable"
+  /api/v1/notifications:
+    get:
+      tags:
+        - Realtime
+      operationId: subscribeNotifications
+      summary: Receive advisory Server revision notifications
+      description: |
+        WebSocket upgrade endpoint. Messages are advisory and may be lost,
+        duplicated, or reordered; clients must fetch authoritative state using
+        the synchronization HTTP endpoints.
+      x-vaultdatum-websocket: true
+      responses:
+        "101":
+          description: WebSocket protocol switched
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RevisionAdvancedNotification"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
   /api/v1/manifests:
     post:
       tags:
@@ -402,6 +425,18 @@ components:
         hashAlgorithm:
           type: string
           const: SHA-256
+    RevisionAdvancedNotification:
+      type: object
+      additionalProperties: false
+      required:
+        - type
+        - currentRevision
+      properties:
+        type:
+          type: string
+          const: REVISION_ADVANCED
+        currentRevision:
+          $ref: "#/components/schemas/CommittedRevision"
     ManifestCreated:
       type: object
       additionalProperties: false

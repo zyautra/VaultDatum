@@ -12,6 +12,7 @@ import {
 
 import { ClientStore, type RemoteConflict } from "./storage/client-store";
 import { CreateSync, type SyncSummary } from "./sync/create-sync";
+import { NotificationChannel } from "./sync/notification-channel";
 import type { LocalVault } from "./sync/remote-apply";
 import { ServerClient } from "./transport/server-client";
 
@@ -32,6 +33,8 @@ export default class VaultDatumPlugin extends Plugin {
 
     private createSync: CreateSync | undefined;
 
+    private notificationChannel: NotificationChannel | undefined;
+
     private captureQueue: Promise<void> = Promise.resolve();
 
     public async onload(): Promise<void> {
@@ -42,6 +45,12 @@ export default class VaultDatumPlugin extends Plugin {
             new ServerClient(),
             new ObsidianLocalVault(this.app),
             () => this.serverUrl(),
+        );
+        this.notificationChannel = new NotificationChannel(
+            () => this.serverUrl(),
+            () => {
+                void this.syncNow(false);
+            },
         );
         this.addSettingTab(new VaultDatumSettingTab(this.app, this));
         this.addCommand({
@@ -103,17 +112,20 @@ export default class VaultDatumPlugin extends Plugin {
 
         this.app.workspace.onLayoutReady(() => {
             this.observeVaultChanges();
+            this.notificationChannel?.start();
             void this.syncNow(false);
         });
     }
 
     public onunload(): void {
+        this.notificationChannel?.stop();
         this.store?.close();
     }
 
     public async updateServerUrl(serverUrl: string): Promise<void> {
         this.syncSettings.serverUrl = serverUrl.trim();
         await this.saveSettings();
+        this.notificationChannel?.restart();
         void this.syncNow(false);
     }
 

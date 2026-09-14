@@ -16,6 +16,7 @@ import io.vaultdatum.server.sync.OperationResult;
 import io.vaultdatum.server.sync.OperationIdReuseException;
 import io.vaultdatum.server.sync.PresentBase;
 import io.vaultdatum.server.sync.RecoveryRequiredException;
+import io.vaultdatum.server.sync.RevisionNotificationPublisher;
 import io.vaultdatum.server.sync.SyncPath;
 import io.vaultdatum.server.sync.UnknownCreateBase;
 import io.quarkus.runtime.annotations.RegisterForReflection;
@@ -44,15 +45,19 @@ public final class OperationResource {
 
     private final ModifyCoordinator modifyCoordinator;
 
+    private final RevisionNotificationPublisher notificationPublisher;
+
     public OperationResource(
             ObjectMapper objectMapper,
             DataDirectories dataDirectories,
             CreateCoordinator createCoordinator,
-            ModifyCoordinator modifyCoordinator) {
+            ModifyCoordinator modifyCoordinator,
+            RevisionNotificationPublisher notificationPublisher) {
         this.objectMapper = objectMapper;
         this.dataDirectories = dataDirectories;
         this.createCoordinator = createCoordinator;
         this.modifyCoordinator = modifyCoordinator;
+        this.notificationPublisher = notificationPublisher;
     }
 
     @POST
@@ -86,12 +91,14 @@ public final class OperationResource {
                 CreateOperation operation = createOperation(request, actualContent);
                 CreateOperationResult result = createCoordinator.commit(operation, stagedContent);
                 discardReplayUpload(result.replayed(), stagedContent);
+                publishRevision(result.replayed(), result.resultRevision());
                 return Response.ok(response(result)).build();
             }
             if ("MODIFY".equals(request.type())) {
                 ModifyOperation operation = modifyOperation(request, actualContent);
                 OperationResult result = modifyCoordinator.commit(operation, stagedContent);
                 discardReplayUpload(result.replayed(), stagedContent);
+                publishRevision(result.replayed(), result.resultRevision());
                 return Response.ok(response(result)).build();
             }
 
@@ -123,6 +130,12 @@ public final class OperationResource {
             Files.deleteIfExists(content);
         } catch (IOException exception) {
             throw new IllegalStateException("Could not discard uncommitted staged content", exception);
+        }
+    }
+
+    private void publishRevision(boolean replayed, long revision) {
+        if (!replayed) {
+            notificationPublisher.publish(revision);
         }
     }
 
