@@ -109,16 +109,27 @@ interface SyncStateMetadata {
     readonly value: ClientSyncState;
 }
 
+interface LocalScanMetadata {
+    readonly key: "local-scan-initialized";
+    readonly value: true;
+}
+
+export interface LocalScanBaseline {
+    readonly path: string;
+    readonly contentHash: string;
+}
+
 interface Artifact {
     readonly artifactId: string;
     readonly content: Blob;
 }
 
-const DATABASE_VERSION = 4;
+const DATABASE_VERSION = 5;
 const METADATA_STORE = "metadata";
 const PENDING_STORE = "pending";
 const ARTIFACT_STORE = "artifact";
 const REPLICA_STORE = "replica";
+const LOCAL_SCAN_STORE = "local-scan";
 const APPLY_STORE = "apply";
 const CONFLICT_STORE = "conflict";
 const KEEP_BOTH_STORE = "keep-both";
@@ -365,6 +376,69 @@ export class ClientStore {
 
     public async putReplica(entry: ReplicaEntry): Promise<void> {
         await this.put(REPLICA_STORE, entry);
+    }
+
+    public async replicas(): Promise<ReplicaEntry[]> {
+        return (await this.values<ReplicaEntry>(REPLICA_STORE)).sort(
+            (left, right) => left.path.localeCompare(right.path),
+        );
+    }
+
+    public async initializeLocalScan(
+        baseline: readonly LocalScanBaseline[],
+    ): Promise<boolean> {
+        const initialized = await this.metadata<LocalScanMetadata>(
+            "local-scan-initialized",
+        );
+        if (initialized?.value === true) {
+            return false;
+        }
+
+        const transaction = this.database.transaction(
+            [METADATA_STORE, LOCAL_SCAN_STORE],
+            "readwrite",
+        );
+        for (const entry of baseline) {
+            transaction.objectStore(LOCAL_SCAN_STORE).put(entry);
+        }
+        transaction.objectStore(METADATA_STORE).put({
+            key: "local-scan-initialized",
+            value: true,
+        } satisfies LocalScanMetadata);
+        await transactionDone(transaction);
+        return true;
+    }
+
+    public async localScanBaseline(
+        path: string,
+    ): Promise<LocalScanBaseline | undefined> {
+        return this.value<LocalScanBaseline>(LOCAL_SCAN_STORE, path);
+    }
+
+    public async hasStoredOperationForPath(path: string): Promise<boolean> {
+        return (await this.pendingRecords()).some(
+            (record) =>
+                record.path === path ||
+                (record.type === "RENAME" && record.destinationPath === path),
+        );
+    }
+
+    public async clearCommittedOperations(): Promise<void> {
+        const committed = (await this.pendingRecords()).filter(
+            (record) => record.status === "COMMITTED",
+        );
+        if (committed.length === 0) {
+            return;
+        }
+
+        const transaction = this.database.transaction(
+            [PENDING_STORE, ARTIFACT_STORE],
+            "readwrite",
+        );
+        for (const pending of committed) {
+            this.discardPendingInTransaction(transaction, pending);
+        }
+        await transactionDone(transaction);
     }
 
     public async applyIntents(): Promise<ApplyIntent[]> {
@@ -696,7 +770,7 @@ export class ClientStore {
     }
 
     private async saveMetadata(
-        metadata: ClientIdMetadata | SyncStateMetadata,
+        metadata: ClientIdMetadata | SyncStateMetadata | LocalScanMetadata,
     ): Promise<void> {
         await this.put(METADATA_STORE, metadata);
     }
@@ -806,6 +880,11 @@ function openDatabase(databaseName: string): Promise<IDBDatabase> {
             }
             if (!database.objectStoreNames.contains(REPLICA_STORE)) {
                 database.createObjectStore(REPLICA_STORE, { keyPath: "path" });
+            }
+            if (!database.objectStoreNames.contains(LOCAL_SCAN_STORE)) {
+                database.createObjectStore(LOCAL_SCAN_STORE, {
+                    keyPath: "path",
+                });
             }
             if (!database.objectStoreNames.contains(APPLY_STORE)) {
                 const apply = database.createObjectStore(APPLY_STORE, {

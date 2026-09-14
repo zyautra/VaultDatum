@@ -67,6 +67,15 @@ contains several revisions for one path, it applies the final state rather than
 asking the server for content that is no longer current. Existing divergent
 local content becomes a conflict; it is never overwritten.
 
+The client also performs a local integrity scan to recover missed file events.
+It compares file hashes against the replica index, durably queues missed local
+modifications and deletions, and quarantines a file that reappears after a
+known server deletion. Files already present when synchronization is first set
+up are retained as an untracked baseline rather than uploaded automatically.
+The **Full reconciliation** command compares that local state and replica index
+with a fresh server manifest; the same manifest recovery runs automatically
+when the incremental journal is no longer available.
+
 Before replacing a local file, a client records a prepared apply intent and
 stores the verified remote bytes as a temporary IndexedDB artifact. On restart,
 it finalizes an already-applied result, resumes a staged safe write, discards an

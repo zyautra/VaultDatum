@@ -134,6 +134,257 @@ async function preservesExistingLocalContentDuringInitialManifestSync(): Promise
     store.close();
 }
 
+async function recoversAMissedLocalModificationDuringIntegrityScan(): Promise<void> {
+    const path = "notes/missed-local-modify.md";
+    const base = bytes("Replicated base content");
+    const local = bytes("Local content after a missed event");
+    const baseHash = await contentHash(base);
+    const store = await ClientStore.open(
+        `test-local-integrity-${crypto.randomUUID()}`,
+    );
+    await store.advanceCursor("V-reconciliation", 1);
+    await store.putReplica({
+        path,
+        entryType: "FILE",
+        state: "PRESENT",
+        revision: 1,
+        contentHash: baseHash,
+        size: base.byteLength,
+    });
+    const vault = new MemoryVault();
+    await vault.writeFile(path, local);
+    const sync = new CreateSync(
+        store,
+        new FullReconciliationTransport(1, 1, [], new Map()),
+        vault,
+        () => "https://vaultdatum.test",
+    );
+
+    const summary = await sync.sync();
+
+    assert.equal(summary.offline, true);
+    const [pending] = await store.pendingOperations();
+    assert.equal(pending?.type, "MODIFY");
+    assert.equal(pending?.path, path);
+    if (pending?.type === "MODIFY") {
+        assert.equal(pending.baseRevision, 1);
+        assert.equal(pending.baseContentHash, baseHash);
+        assert.equal(pending.contentHash, await contentHash(local));
+    }
+    store.close();
+}
+
+async function preservesInitialUntrackedFilesUntilTheyChange(): Promise<void> {
+    const path = "notes/preexisting-local.md";
+    const initial = bytes("Pre-existing local content");
+    const changed = bytes("A later local edit after plugin setup");
+    const store = await ClientStore.open(
+        `test-local-baseline-${crypto.randomUUID()}`,
+    );
+    const vault = new MemoryVault();
+    await vault.writeFile(path, initial);
+    const sync = new CreateSync(
+        store,
+        new FullReconciliationTransport(0, 0, [], new Map()),
+        vault,
+        () => "https://vaultdatum.test",
+    );
+
+    const initialSummary = await sync.sync();
+
+    assert.equal(initialSummary.offline, false);
+    assert.deepEqual(await store.pendingOperations(), []);
+
+    await vault.writeFile(path, changed);
+    const changedSummary = await sync.sync();
+
+    assert.equal(changedSummary.offline, true);
+    const [pending] = await store.pendingOperations();
+    assert.equal(pending?.type, "CREATE");
+    assert.equal(pending?.path, path);
+    store.close();
+}
+
+async function quarantinesAFileThatReappearsAfterServerDeletion(): Promise<void> {
+    const path = "notes/reappeared-after-delete.md";
+    const local = bytes("A stale or locally restored file");
+    const store = await ClientStore.open(
+        `test-reappeared-tombstone-${crypto.randomUUID()}`,
+    );
+    await store.advanceCursor("V-reconciliation", 1);
+    await store.putReplica({
+        path,
+        entryType: "FILE",
+        state: "DELETED",
+        revision: 1,
+    });
+    const vault = new MemoryVault();
+    await vault.writeFile(path, local);
+    const sync = new CreateSync(
+        store,
+        new FullReconciliationTransport(
+            1,
+            1,
+            [deletedManifestEntry(path, 1)],
+            new Map(),
+        ),
+        vault,
+        () => "https://vaultdatum.test",
+    );
+
+    const summary = await sync.sync();
+
+    assert.equal(summary.offline, false);
+    assert.equal(summary.conflicted, 1);
+    assert.equal(await vault.hash(path), await contentHash(local));
+    assert.equal((await store.conflict(path))?.code, "LOCAL_STATE_DIVERGED");
+    assert.deepEqual(await store.pendingOperations(), []);
+    store.close();
+}
+
+async function repairsAMissingReplicaEntryFromTheServerManifest(): Promise<void> {
+    const path = "notes/missing-replica.md";
+    const serverContent = bytes("Authoritative content already on disk");
+    const serverHash = await contentHash(serverContent);
+    const store = await ClientStore.open(
+        `test-manifest-repair-${crypto.randomUUID()}`,
+    );
+    const vault = new MemoryVault();
+    await vault.writeFile(path, serverContent);
+    const sync = new CreateSync(
+        store,
+        new FullReconciliationTransport(
+            7,
+            7,
+            [
+                presentManifestEntry(
+                    path,
+                    7,
+                    serverHash,
+                    serverContent.byteLength,
+                ),
+            ],
+            new Map([[path, serverContent]]),
+        ),
+        vault,
+        () => "https://vaultdatum.test",
+    );
+
+    const summary = await sync.fullReconcile();
+
+    assert.equal(summary.offline, false);
+    assert.equal(summary.conflicted, 0);
+    assert.deepEqual(await store.replica(path), {
+        path,
+        entryType: "FILE",
+        state: "PRESENT",
+        revision: 7,
+        contentHash: serverHash,
+        size: serverContent.byteLength,
+    });
+    assert.equal((await store.syncState()).serverCursor, 7);
+    store.close();
+}
+
+async function preservesLocalContentWhenManifestDeletionOverlapsMissedEdit(): Promise<void> {
+    const path = "notes/delete-versus-missed-edit.md";
+    const base = bytes("Server base content");
+    const local = bytes("Local content after a missed modify event");
+    const baseHash = await contentHash(base);
+    const store = await ClientStore.open(
+        `test-manifest-delete-conflict-${crypto.randomUUID()}`,
+    );
+    await store.advanceCursor("V-reconciliation", 1);
+    await store.putReplica({
+        path,
+        entryType: "FILE",
+        state: "PRESENT",
+        revision: 1,
+        contentHash: baseHash,
+        size: base.byteLength,
+    });
+    const vault = new MemoryVault();
+    await vault.writeFile(path, local);
+    const sync = new CreateSync(
+        store,
+        new FullReconciliationTransport(
+            2,
+            2,
+            [deletedManifestEntry(path, 2)],
+            new Map(),
+        ),
+        vault,
+        () => "https://vaultdatum.test",
+    );
+
+    const summary = await sync.fullReconcile();
+
+    assert.equal(summary.offline, false);
+    assert.equal(summary.conflicted, 1);
+    assert.equal(await vault.hash(path), await contentHash(local));
+    assert.equal(
+        (await store.conflict(path))?.code,
+        "SERVER_MANIFEST_OVERLAPS_PENDING",
+    );
+    assert.deepEqual(await store.replica(path), {
+        path,
+        entryType: "FILE",
+        state: "DELETED",
+        revision: 2,
+    });
+    store.close();
+}
+
+async function fallsBackToAManifestWhenHistoryIsUnavailable(): Promise<void> {
+    const path = "notes/history-gap.md";
+    const base = bytes("Content before journal retention");
+    const serverContent = bytes("Current content after journal retention");
+    const baseHash = await contentHash(base);
+    const serverHash = await contentHash(serverContent);
+    const store = await ClientStore.open(
+        `test-history-manifest-fallback-${crypto.randomUUID()}`,
+    );
+    await store.advanceCursor("V-reconciliation", 1);
+    await store.putReplica({
+        path,
+        entryType: "FILE",
+        state: "PRESENT",
+        revision: 1,
+        contentHash: baseHash,
+        size: base.byteLength,
+    });
+    const vault = new MemoryVault();
+    await vault.writeFile(path, base);
+    const sync = new CreateSync(
+        store,
+        new FullReconciliationTransport(
+            2,
+            2,
+            [
+                presentManifestEntry(
+                    path,
+                    2,
+                    serverHash,
+                    serverContent.byteLength,
+                ),
+            ],
+            new Map([[path, serverContent]]),
+            true,
+        ),
+        vault,
+        () => "https://vaultdatum.test",
+    );
+
+    const summary = await sync.sync();
+
+    assert.equal(summary.offline, false);
+    assert.equal(summary.conflicted, 0);
+    assert.equal(await vault.hash(path), serverHash);
+    assert.equal((await store.replica(path))?.revision, 2);
+    assert.equal((await store.syncState()).serverCursor, 2);
+    store.close();
+}
+
 async function discardsAnApplyInterruptedBeforeContentIsStaged(): Promise<void> {
     const path = "notes/prepared-apply.md";
     const remote = bytes("Remote content waiting to download");
@@ -1648,6 +1899,110 @@ class ManifestTransport extends NoopTransport {
     }
 }
 
+class FullReconciliationTransport extends NoopTransport {
+    public constructor(
+        private readonly currentRevision: number,
+        private readonly snapshotRevision: number,
+        private readonly entries: readonly RemoteManifestEntry[],
+        private readonly content: ReadonlyMap<string, ArrayBuffer>,
+        private readonly historyUnavailable = false,
+    ) {
+        super();
+    }
+
+    public override async readVault(
+        serverUrl: string,
+    ): Promise<ReadResult<RemoteVaultInfo>> {
+        void serverUrl;
+        return {
+            kind: "OK",
+            value: {
+                vaultId: "V-reconciliation",
+                currentRevision: this.currentRevision,
+                oldestRetainedRevision: 0,
+                protocolVersion: 1,
+                hashAlgorithm: "SHA-256",
+            },
+        };
+    }
+
+    public override async createManifest(
+        serverUrl: string,
+    ): Promise<ReadResult<RemoteManifestCreated>> {
+        void serverUrl;
+        return {
+            kind: "OK",
+            value: {
+                manifestId: "M-reconciliation",
+                vaultId: "V-reconciliation",
+                snapshotRevision: this.snapshotRevision,
+                expiresAt: "2030-01-01T00:00:00Z",
+            },
+        };
+    }
+
+    public override async readManifest(
+        serverUrl: string,
+        manifestId: string,
+    ): Promise<ReadResult<RemoteManifest>> {
+        void serverUrl;
+        if (manifestId !== "M-reconciliation") {
+            return { kind: "MANIFEST_EXPIRED" };
+        }
+        return {
+            kind: "OK",
+            value: {
+                manifestId,
+                vaultId: "V-reconciliation",
+                snapshotRevision: this.snapshotRevision,
+                expiresAt: "2030-01-01T00:00:00Z",
+                entries: this.entries,
+            },
+        };
+    }
+
+    public override async listChanges(
+        serverUrl: string,
+        after: number,
+        limit: number,
+    ): Promise<ReadResult<RemoteChangePage>> {
+        void serverUrl;
+        void limit;
+        if (this.historyUnavailable && after < this.currentRevision) {
+            return { kind: "HISTORY_NOT_AVAILABLE" };
+        }
+        return {
+            kind: "OK",
+            value: {
+                vaultId: "V-reconciliation",
+                fromExclusive: after,
+                toInclusive: after,
+                currentRevision: this.currentRevision,
+                hasMore: false,
+                changes: [],
+            },
+        };
+    }
+
+    public override async downloadContent(
+        serverUrl: string,
+        path: string,
+        revision: number,
+        contentHashValue: string,
+    ): Promise<ReadResult<ArrayBuffer>> {
+        void serverUrl;
+        void revision;
+        const content = this.content.get(path);
+        if (
+            content === undefined ||
+            (await contentHash(content)) !== contentHashValue
+        ) {
+            return { kind: "STATE_CHANGED" };
+        }
+        return { kind: "OK", value: content.slice(0) };
+    }
+}
+
 class RetryingTransport extends NoopTransport {
     private available = false;
 
@@ -1745,6 +2100,12 @@ class RetryingTransport extends NoopTransport {
 class MemoryVault implements LocalVault {
     private readonly files = new Map<string, ArrayBuffer>();
 
+    public async listFiles(): Promise<readonly string[]> {
+        return [...this.files.keys()].sort((left, right) =>
+            left.localeCompare(right),
+        );
+    }
+
     public async readFile(path: string): Promise<ArrayBuffer | undefined> {
         return this.files.get(path)?.slice(0);
     }
@@ -1813,6 +2174,34 @@ function createChange(
     };
 }
 
+function presentManifestEntry(
+    path: string,
+    revision: number,
+    contentHashValue: string,
+    size: number,
+): RemoteManifestEntry {
+    return {
+        path,
+        entryType: "FILE",
+        state: "PRESENT",
+        revision,
+        contentHash: contentHashValue,
+        size,
+    };
+}
+
+function deletedManifestEntry(
+    path: string,
+    revision: number,
+): RemoteManifestEntry {
+    return {
+        path,
+        entryType: "FILE",
+        state: "DELETED",
+        revision,
+    };
+}
+
 function bytes(value: string): ArrayBuffer {
     return new TextEncoder().encode(value).buffer;
 }
@@ -1859,6 +2248,12 @@ async function pendingModify(
 await appliesARemoteCreateToAnEmptyVault();
 await initializesFromAManifestAndCatchesUpLaterChanges();
 await preservesExistingLocalContentDuringInitialManifestSync();
+await recoversAMissedLocalModificationDuringIntegrityScan();
+await preservesInitialUntrackedFilesUntilTheyChange();
+await quarantinesAFileThatReappearsAfterServerDeletion();
+await repairsAMissingReplicaEntryFromTheServerManifest();
+await preservesLocalContentWhenManifestDeletionOverlapsMissedEdit();
+await fallsBackToAManifestWhenHistoryIsUnavailable();
 await discardsAnApplyInterruptedBeforeContentIsStaged();
 await resumesAStagedApplyAfterRestartBeforeLocalWrite();
 await finalizesAnApplyAfterLocalWriteBeforeMetadataFinalization();

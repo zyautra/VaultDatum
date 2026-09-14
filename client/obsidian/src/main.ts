@@ -52,6 +52,13 @@ export default class VaultDatumPlugin extends Plugin {
             },
         });
         this.addCommand({
+            id: "full-reconcile",
+            name: "Full reconciliation",
+            callback: () => {
+                void this.fullReconcile(true);
+            },
+        });
+        this.addCommand({
             id: "resolve-conflict-use-server",
             name: "Resolve conflict: use Server",
             callback: () => {
@@ -248,6 +255,29 @@ export default class VaultDatumPlugin extends Plugin {
             if (showResult) {
                 new Notice(
                     "VaultDatum synchronization could not complete. Pending work is kept locally.",
+                );
+            }
+        }
+    }
+
+    private async fullReconcile(showResult: boolean): Promise<void> {
+        const createSync = this.createSync;
+
+        if (createSync === undefined) {
+            return;
+        }
+
+        try {
+            const summary = await createSync.fullReconcile();
+
+            if (showResult) {
+                this.showSyncResult(summary);
+            }
+        } catch {
+            console.warn("VaultDatum full reconciliation failed");
+            if (showResult) {
+                new Notice(
+                    "VaultDatum could not complete full reconciliation. Pending work is kept locally.",
                 );
             }
         }
@@ -621,6 +651,10 @@ export default class VaultDatumPlugin extends Plugin {
 
 class ObsidianLocalVault implements LocalVault {
     public constructor(private readonly app: App) {}
+
+    public async listFiles(): Promise<readonly string[]> {
+        return this.app.vault.getFiles().map((file) => file.path);
+    }
 
     public async readFile(path: string): Promise<ArrayBuffer | undefined> {
         const file = this.app.vault.getAbstractFileByPath(path);

@@ -2,6 +2,7 @@ import { contentHash } from "../core/content-hash";
 import { isSyncPath } from "../core/sync-path";
 import {
     ClientStore,
+    type LocalScanBaseline,
     type PendingCreate,
     type PendingDelete,
     type PendingModify,
@@ -34,6 +35,7 @@ export interface SyncSummary {
 interface PullSummary {
     readonly conflicted: number;
     readonly unavailable: boolean;
+    readonly historyUnavailable: boolean;
 }
 
 export class CreateSync {
@@ -150,8 +152,16 @@ export class CreateSync {
     }
 
     public sync(): Promise<SyncSummary> {
+        return this.startSync(false);
+    }
+
+    public fullReconcile(): Promise<SyncSummary> {
+        return this.startSync(true);
+    }
+
+    private startSync(fullReconciliation: boolean): Promise<SyncSummary> {
         if (this.activeSync === undefined) {
-            this.activeSync = this.runSync().finally(() => {
+            this.activeSync = this.runSync(fullReconciliation).finally(() => {
                 this.activeSync = undefined;
             });
         }
@@ -297,7 +307,7 @@ export class CreateSync {
         return pending;
     }
 
-    private async runSync(): Promise<SyncSummary> {
+    private async runSync(fullReconciliation: boolean): Promise<SyncSummary> {
         const serverUrl = this.serverUrl();
 
         if (serverUrl.length === 0) {
@@ -306,10 +316,28 @@ export class CreateSync {
 
         try {
             await this.remoteApply.recoverInterruptedApplies();
+            const local = await this.reconcileLocalVault();
 
-            const beforePush = await this.pull(serverUrl);
+            let beforePush = fullReconciliation
+                ? await this.reconcileServerManifest(serverUrl)
+                : await this.pull(serverUrl);
+            let beforePushConflicted = local.conflicted + beforePush.conflicted;
+
             if (beforePush.unavailable) {
-                return unavailable(0, beforePush.conflicted);
+                return unavailable(0, beforePushConflicted);
+            }
+            if (beforePush.historyUnavailable) {
+                const reconciled =
+                    await this.reconcileServerManifest(serverUrl);
+                beforePushConflicted += reconciled.conflicted;
+                if (reconciled.unavailable) {
+                    return unavailable(0, beforePushConflicted);
+                }
+                beforePush = await this.pull(serverUrl);
+                beforePushConflicted += beforePush.conflicted;
+                if (beforePush.unavailable || beforePush.historyUnavailable) {
+                    return unavailable(0, beforePushConflicted);
+                }
             }
 
             await this.remoteApply.recoverKeepBothResolutions(serverUrl);
@@ -319,26 +347,50 @@ export class CreateSync {
             if (pushed.offline) {
                 return unavailable(
                     pushed.committed,
-                    beforePush.conflicted + pushed.conflicted,
+                    beforePushConflicted + pushed.conflicted,
                 );
             }
 
-            const afterPush = await this.pull(serverUrl);
+            let afterPush = await this.pull(serverUrl);
+            let afterPushConflicted = afterPush.conflicted;
             if (afterPush.unavailable) {
                 return unavailable(
                     pushed.committed,
-                    beforePush.conflicted +
+                    beforePushConflicted +
                         pushed.conflicted +
-                        afterPush.conflicted,
+                        afterPushConflicted,
                 );
+            }
+            if (afterPush.historyUnavailable) {
+                const reconciled =
+                    await this.reconcileServerManifest(serverUrl);
+                afterPushConflicted += reconciled.conflicted;
+                if (reconciled.unavailable) {
+                    return unavailable(
+                        pushed.committed,
+                        beforePushConflicted +
+                            pushed.conflicted +
+                            afterPushConflicted,
+                    );
+                }
+                afterPush = await this.pull(serverUrl);
+                afterPushConflicted += afterPush.conflicted;
+                if (afterPush.unavailable || afterPush.historyUnavailable) {
+                    return unavailable(
+                        pushed.committed,
+                        beforePushConflicted +
+                            pushed.conflicted +
+                            afterPushConflicted,
+                    );
+                }
             }
 
             return {
                 committed: pushed.committed,
                 conflicted:
-                    beforePush.conflicted +
+                    beforePushConflicted +
                     pushed.conflicted +
-                    afterPush.conflicted,
+                    afterPushConflicted,
                 offline: false,
                 vaultMismatch: false,
             };
@@ -357,11 +409,181 @@ export class CreateSync {
         }
     }
 
+    private async reconcileLocalVault(): Promise<{
+        readonly conflicted: number;
+    }> {
+        const local = new Map<
+            string,
+            { readonly content: ArrayBuffer; readonly contentHash: string }
+        >();
+        const paths = [...new Set(await this.localVault.listFiles())]
+            .filter(isSyncPath)
+            .sort((left, right) => left.localeCompare(right));
+
+        for (const path of paths) {
+            const content = await this.localVault.readFile(path);
+            if (content !== undefined) {
+                local.set(path, {
+                    content,
+                    contentHash: await contentHash(content),
+                });
+            }
+        }
+
+        await this.store.initializeLocalScan(
+            [...local.entries()].map(
+                ([path, file]) =>
+                    ({
+                        path,
+                        contentHash: file.contentHash,
+                    }) satisfies LocalScanBaseline,
+            ),
+        );
+
+        let conflicted = 0;
+        for (const replica of await this.store.replicas()) {
+            if (
+                !isSyncPath(replica.path) ||
+                (await this.store.hasConflict(replica.path)) ||
+                (await this.store.hasStoredOperationForPath(replica.path))
+            ) {
+                continue;
+            }
+
+            const file = local.get(replica.path);
+            if (replica.state === "PRESENT") {
+                if (!isPresentFile(replica)) {
+                    if (
+                        await this.remoteApply.recordLocalDivergence(
+                            replica.path,
+                            replica,
+                        )
+                    ) {
+                        conflicted += 1;
+                    }
+                    continue;
+                }
+                if (file === undefined) {
+                    await this.captureDelete(replica.path);
+                } else if (file.contentHash !== replica.contentHash) {
+                    await this.captureModify(replica.path, file.content);
+                }
+                continue;
+            }
+
+            if (
+                file !== undefined &&
+                (await this.remoteApply.recordLocalDivergence(
+                    replica.path,
+                    replica,
+                ))
+            ) {
+                conflicted += 1;
+            }
+        }
+
+        for (const [path, file] of local) {
+            if (
+                (await this.store.replica(path)) !== undefined ||
+                (await this.store.hasConflict(path)) ||
+                (await this.store.hasStoredOperationForPath(path))
+            ) {
+                continue;
+            }
+
+            const baseline = await this.store.localScanBaseline(path);
+            if (baseline?.contentHash === file.contentHash) {
+                continue;
+            }
+            await this.captureModify(path, file.content);
+        }
+
+        return { conflicted };
+    }
+
+    private async reconcileServerManifest(
+        serverUrl: string,
+    ): Promise<PullSummary> {
+        const vault = await this.serverClient.readVault(serverUrl);
+        if (vault.kind !== "OK") {
+            return {
+                conflicted: 0,
+                unavailable: true,
+                historyUnavailable: false,
+            };
+        }
+
+        const state = await this.store.confirmVault(vault.value.vaultId);
+        const created = await this.serverClient.createManifest(serverUrl);
+        if (created.kind !== "OK") {
+            return {
+                conflicted: 0,
+                unavailable: true,
+                historyUnavailable: false,
+            };
+        }
+        if (created.value.vaultId !== vault.value.vaultId) {
+            throw new Error(
+                "Server changed Vault identity during manifest creation",
+            );
+        }
+
+        const manifest = await this.serverClient.readManifest(
+            serverUrl,
+            created.value.manifestId,
+        );
+        if (manifest.kind !== "OK") {
+            return {
+                conflicted: 0,
+                unavailable: true,
+                historyUnavailable: false,
+            };
+        }
+        validateManifest(created.value, manifest.value, vault.value.vaultId);
+        if (manifest.value.snapshotRevision < state.serverCursor) {
+            throw new Error("Server manifest predates the local cursor");
+        }
+
+        const manifestPaths = new Set<string>();
+        for (const entry of manifest.value.entries) {
+            if (manifestPaths.has(entry.path)) {
+                throw new Error("Server manifest contains duplicate paths");
+            }
+            manifestPaths.add(entry.path);
+        }
+        for (const replica of await this.store.replicas()) {
+            if (!manifestPaths.has(replica.path)) {
+                throw new Error(
+                    "Server manifest omitted a path retained by the local replica",
+                );
+            }
+        }
+
+        let conflicted = 0;
+        for (const entry of manifest.value.entries) {
+            const integrated = await this.remoteApply.integrateManifestEntry(
+                serverUrl,
+                entry,
+            );
+            conflicted += integrated.conflicted;
+        }
+        await this.store.advanceCursor(
+            vault.value.vaultId,
+            manifest.value.snapshotRevision,
+        );
+        await this.store.clearCommittedOperations();
+        return { conflicted, unavailable: false, historyUnavailable: false };
+    }
+
     private async pull(serverUrl: string): Promise<PullSummary> {
         const vault = await this.serverClient.readVault(serverUrl);
 
         if (vault.kind !== "OK") {
-            return { conflicted: 0, unavailable: true };
+            return {
+                conflicted: 0,
+                unavailable: true,
+                historyUnavailable: false,
+            };
         }
 
         let state = await this.store.confirmVault(vault.value.vaultId);
@@ -384,7 +606,11 @@ export class CreateSync {
         }
 
         if (state.serverCursor >= vault.value.currentRevision) {
-            return { conflicted, unavailable: false };
+            return {
+                conflicted,
+                unavailable: false,
+                historyUnavailable: false,
+            };
         }
 
         let cursor = state.serverCursor;
@@ -397,8 +623,19 @@ export class CreateSync {
                 500,
             );
 
+            if (page.kind === "HISTORY_NOT_AVAILABLE") {
+                return {
+                    conflicted,
+                    unavailable: false,
+                    historyUnavailable: true,
+                };
+            }
             if (page.kind !== "OK") {
-                return { conflicted: 0, unavailable: true };
+                return {
+                    conflicted,
+                    unavailable: true,
+                    historyUnavailable: false,
+                };
             }
             if (page.value.vaultId !== vault.value.vaultId) {
                 throw new Error(
@@ -462,7 +699,7 @@ export class CreateSync {
             conflicted += integrated.conflicted;
         }
         await this.store.advanceCursor(vault.value.vaultId, cursor);
-        return { conflicted, unavailable: false };
+        return { conflicted, unavailable: false, historyUnavailable: false };
     }
 
     private async initializeFromManifest(
@@ -471,7 +708,11 @@ export class CreateSync {
     ): Promise<PullSummary> {
         const created = await this.serverClient.createManifest(serverUrl);
         if (created.kind !== "OK") {
-            return { conflicted: 0, unavailable: true };
+            return {
+                conflicted: 0,
+                unavailable: true,
+                historyUnavailable: false,
+            };
         }
         if (created.value.vaultId !== vaultId) {
             throw new Error(
@@ -484,7 +725,11 @@ export class CreateSync {
             created.value.manifestId,
         );
         if (manifest.kind !== "OK") {
-            return { conflicted: 0, unavailable: true };
+            return {
+                conflicted: 0,
+                unavailable: true,
+                historyUnavailable: false,
+            };
         }
         validateManifest(created.value, manifest.value, vaultId);
 
@@ -500,7 +745,7 @@ export class CreateSync {
             vaultId,
             manifest.value.snapshotRevision,
         );
-        return { conflicted, unavailable: false };
+        return { conflicted, unavailable: false, historyUnavailable: false };
     }
 
     private async push(serverUrl: string): Promise<{

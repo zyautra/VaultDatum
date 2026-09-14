@@ -20,6 +20,7 @@ import {
 } from "../transport/server-client";
 
 export interface LocalVault {
+    listFiles(): Promise<readonly string[]>;
     readFile(path: string): Promise<ArrayBuffer | undefined>;
     writeFile(path: string, content: ArrayBuffer): Promise<void>;
     removeFile(path: string): Promise<void>;
@@ -93,21 +94,76 @@ export class RemoteApply {
         serverUrl: string,
         entry: RemoteManifestEntry,
     ): Promise<RemoteIntegration> {
-        return this.integrateChange(serverUrl, {
-            revision: entry.revision,
-            type: entry.state === "DELETED" ? "DELETE" : "CREATE",
-            operationId: `manifest:${entry.revision}:${entry.path}`,
-            actor: { type: "SYSTEM" },
-            effects: [
-                {
-                    path: entry.path,
-                    entryType: entry.entryType,
-                    state: entry.state,
-                    contentHash: entry.contentHash,
-                    size: entry.size,
-                },
-            ],
-        });
+        const effect: RemoteChangeEffect = {
+            path: entry.path,
+            entryType: entry.entryType,
+            state: entry.state,
+            contentHash: entry.contentHash,
+            size: entry.size,
+        };
+        if (!isSyncPath(effect.path)) {
+            throw new Error("Server returned an invalid sync path");
+        }
+
+        const after = replicaEntry(entry.revision, effect);
+        if (await this.store.hasConflict(effect.path)) {
+            await this.store.putReplica(after);
+            return { conflicted: 0 };
+        }
+
+        const pending = await this.store.pendingForPath(effect.path);
+        if (pending !== undefined) {
+            await this.recordConflict(
+                effect.path,
+                after,
+                "SERVER_MANIFEST_OVERLAPS_PENDING",
+                pending,
+                `manifest:${entry.revision}:${entry.path}`,
+            );
+            return { conflicted: 1 };
+        }
+
+        const actual = await this.localHash(effect.path);
+        if (matches(after, actual)) {
+            await this.store.putReplica(after);
+            return { conflicted: 0 };
+        }
+
+        const existingReplica = await this.store.replica(effect.path);
+        if (!matches(existingReplica, actual)) {
+            await this.recordConflict(
+                effect.path,
+                after,
+                "LOCAL_STATE_DIVERGED",
+                undefined,
+                `manifest:${entry.revision}:${entry.path}`,
+            );
+            return { conflicted: 1 };
+        }
+
+        return {
+            conflicted: (await this.apply(
+                serverUrl,
+                effect.path,
+                existingReplica,
+                after,
+                actual,
+            ))
+                ? 1
+                : 0,
+        };
+    }
+
+    public async recordLocalDivergence(
+        path: string,
+        serverState: ReplicaEntry,
+    ): Promise<boolean> {
+        if (await this.store.hasConflict(path)) {
+            return false;
+        }
+
+        await this.recordConflict(path, serverState, "LOCAL_STATE_DIVERGED");
+        return true;
     }
 
     private async integrateOwnRename(
