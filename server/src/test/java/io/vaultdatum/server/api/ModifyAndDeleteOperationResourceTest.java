@@ -164,6 +164,47 @@ class ModifyAndDeleteOperationResourceTest {
                 .body("changes[0].effects[1].contentHash", is(contentHash));
     }
 
+    @Test
+    void preservesADeleteTombstoneWhenAnOfflineModifyUsesTheOldBase() throws IOException {
+        String path = "tombstones/" + UUID.randomUUID() + ".md";
+        byte[] initial = "Original content".getBytes(StandardCharsets.UTF_8);
+        String initialHash = ContentHash.calculate(initial);
+        int createdRevision = postContent(
+                createRequest("OP-" + UUID.randomUUID(), path, initial), initial)
+                .then()
+                .statusCode(200)
+                .extract()
+                .path("resultRevision");
+
+        int deletedRevision = given()
+                .contentType("application/json")
+                .body(deleteRequest("OP-" + UUID.randomUUID(), path, createdRevision, initialHash))
+                .when().post("/api/v1/operations")
+                .then()
+                .statusCode(200)
+                .extract()
+                .path("resultRevision");
+
+        byte[] offlineContent = "Offline modification".getBytes(StandardCharsets.UTF_8);
+        postContent(
+                modifyRequest("OP-" + UUID.randomUUID(), path, createdRevision, initialHash, offlineContent),
+                offlineContent)
+                .then()
+                .statusCode(409)
+                .body("error.code", is("BASE_STATE_MISMATCH"));
+
+        assertFalse(Files.exists(dataDirectories.vault().resolve(path)));
+        given()
+                .queryParam("after", deletedRevision - 1)
+                .when().get("/api/v1/changes")
+                .then()
+                .statusCode(200)
+                .body("changes[0].revision", is(deletedRevision))
+                .body("changes[0].type", is("DELETE"))
+                .body("changes[0].effects[0].path", is(path))
+                .body("changes[0].effects[0].state", is("DELETED"));
+    }
+
     private static Response postContent(String metadata, byte[] content) {
         return given()
                 .multiPart(new MultiPartSpecBuilder(metadata)

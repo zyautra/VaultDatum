@@ -748,6 +748,80 @@ async function appliesARemoteDeleteToAMatchingReplica(): Promise<void> {
     store.close();
 }
 
+async function preservesAnOfflineModificationWhenTheServerDeletesItsBase(): Promise<void> {
+    const path = "notes/delete-vs-modify.md";
+    const initial = bytes("Initial server content");
+    const modified = bytes("Offline local modification");
+    const initialHash = await contentHash(initial);
+    const store = await ClientStore.open(
+        `test-delete-vs-modify-${crypto.randomUUID()}`,
+    );
+    const vault = new MemoryVault();
+    await vault.writeFile(path, modified);
+    await store.putReplica({
+        path,
+        entryType: "FILE",
+        state: "PRESENT",
+        revision: 4,
+        contentHash: initialHash,
+        size: initial.byteLength,
+    });
+    const sync = new CreateSync(store, new NoopTransport(), vault, () => "");
+    const pending = await sync.captureModify(path, modified);
+    const apply = new RemoteApply(store, new NoopTransport(), vault);
+
+    const result = await apply.integrateChange("https://vaultdatum.test", {
+        revision: 5,
+        type: "DELETE",
+        operationId: `OP-${crypto.randomUUID()}`,
+        actor: { type: "CLIENT", clientId: "C-remote-client" },
+        effects: [{ path, entryType: "FILE", state: "DELETED" }],
+    });
+
+    assert.equal(pending?.type, "MODIFY");
+    assert.equal(result.conflicted, 1);
+    assert.equal(await vault.hash(path), await contentHash(modified));
+    assert.equal((await store.replica(path))?.state, "DELETED");
+    assert.equal(
+        (await store.conflict(path))?.code,
+        "REMOTE_CHANGE_OVERLAPS_PENDING",
+    );
+    assert.equal((await store.pendingForPath(path))?.status, "CONFLICT");
+    store.close();
+}
+
+async function excludesObsidianConfigurationFromEventsAndReconciliation(): Promise<void> {
+    const configurationPath = ".obsidian/workspace.json";
+    const notePath = "notes/included.md";
+    const configuration = bytes('{"local":true}');
+    const note = bytes("Included content");
+    const store = await ClientStore.open(
+        `test-obsidian-exclusion-${crypto.randomUUID()}`,
+    );
+    const vault = new MemoryVault();
+    await vault.writeFile(configurationPath, configuration);
+    await vault.writeFile(notePath, note);
+    const sync = new CreateSync(
+        store,
+        new FullReconciliationTransport(0, 0, [], new Map()),
+        vault,
+        () => "https://vaultdatum.test",
+    );
+
+    const captured = await sync.captureCreate(configurationPath, configuration);
+    const summary = await sync.sync();
+
+    assert.equal(captured, undefined);
+    assert.equal(summary.conflicted, 0);
+    assert.equal(await store.localScanBaseline(configurationPath), undefined);
+    assert.equal(
+        (await store.localScanBaseline(notePath))?.contentHash,
+        await contentHash(note),
+    );
+    assert.deepEqual(await store.pendingOperations(), []);
+    store.close();
+}
+
 async function queuesModifyThenDeleteAgainstTheSameReplicaBase(): Promise<void> {
     const initial = bytes("Initial note");
     const initialHash = await contentHash(initial);
@@ -2371,6 +2445,8 @@ await preservesUnexpectedLocalContentDuringApplyRecovery();
 await preservesAnExistingLocalFileAsAConflict();
 await integratesAnOwnChangeAfterTheOperationResponseWasLost();
 await appliesARemoteDeleteToAMatchingReplica();
+await preservesAnOfflineModificationWhenTheServerDeletesItsBase();
+await excludesObsidianConfigurationFromEventsAndReconciliation();
 await queuesModifyThenDeleteAgainstTheSameReplicaBase();
 await queuesAndObservesAnOwnRenameAsOneOperation();
 await isolatesBothPathsWhenARemoteRenameOverlapsLocalContent();

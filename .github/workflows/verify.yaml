@@ -17,7 +17,7 @@ jobs:
       - uses: actions/setup-java@v5
         with:
           distribution: temurin
-          java-version: '25'
+          java-version: "25"
       - uses: gradle/actions/setup-gradle@v4
       - run: ./gradlew check --no-daemon
 
@@ -29,7 +29,7 @@ jobs:
       - uses: actions/setup-java@v5
         with:
           distribution: temurin
-          java-version: '25'
+          java-version: "25"
       - uses: gradle/actions/setup-gradle@v4
       - run: >-
           ./gradlew :server:build
@@ -41,6 +41,38 @@ jobs:
       - run: docker build -f server/src/main/docker/Dockerfile.native -t vaultdatum-server:native-test server
       - run: docker run --detach --rm --name vaultdatum-native-test -p 18080:8080 vaultdatum-server:native-test
       - run: curl --fail --retry 10 --retry-connrefused --retry-delay 1 http://127.0.0.1:18080/health
+      - name: Verify a native mutation round trip and retry
+        run: |
+          smoke_directory="$(mktemp -d)"
+          trap 'rm -rf "$smoke_directory"' EXIT
+          content_path="$smoke_directory/content.md"
+          metadata_path="$smoke_directory/operation.json"
+          downloaded_path="$smoke_directory/downloaded.md"
+          printf 'Native container synchronization smoke test\n' > "$content_path"
+          content_hash="sha256:$(sha256sum "$content_path" | awk '{print $1}')"
+          printf '%s\n' \
+            "{\"operationId\":\"OP-native-ci\",\"clientId\":\"C-native-ci\",\"type\":\"CREATE\",\"path\":\"smoke/native.md\",\"base\":[{\"path\":\"smoke/native.md\",\"state\":\"UNKNOWN\"}],\"content\":{\"contentHash\":\"$content_hash\",\"size\":$(wc -c < "$content_path")}}" \
+            > "$metadata_path"
+          response="$(curl --fail --silent --show-error \
+            --form "operation=<${metadata_path};type=application/json" \
+            --form "content=@${content_path};type=application/octet-stream" \
+            http://127.0.0.1:18080/api/v1/operations)"
+          revision="$(printf '%s' "$response" | sed -n 's/.*"resultRevision":\([0-9][0-9]*\).*/\1/p')"
+          test -n "$revision"
+          printf '%s' "$response" | grep -q '"replayed":false'
+          curl --fail --silent --show-error --get \
+            --data-urlencode 'path=smoke/native.md' \
+            --data-urlencode "revision=$revision" \
+            --data-urlencode "hash=$content_hash" \
+            --output "$downloaded_path" \
+            http://127.0.0.1:18080/api/v1/content
+          cmp "$content_path" "$downloaded_path"
+          replay="$(curl --fail --silent --show-error \
+            --form "operation=<${metadata_path};type=application/json" \
+            --form "content=@${content_path};type=application/octet-stream" \
+            http://127.0.0.1:18080/api/v1/operations)"
+          printf '%s' "$replay" | grep -q '"replayed":true'
+          printf '%s' "$replay" | grep -q "\"resultRevision\":$revision"
       - if: always()
         run: docker stop vaultdatum-native-test || true
 
@@ -54,7 +86,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: '24'
+          node-version: "24"
           cache: npm
           cache-dependency-path: |
             client/obsidian/package-lock.json
@@ -62,7 +94,7 @@ jobs:
       - run: npm ci
       - run: npm --prefix ../../protocol ci
       - run: npm run protocol:check
-      - run: npm run check
+      - run: npm test
       - run: npm run lint
       - run: npm run format:check
       - run: npm run build
