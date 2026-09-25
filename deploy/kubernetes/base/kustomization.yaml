@@ -1,0 +1,15 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: vaultdatum
+
+resources:
+  - namespace.yaml
+  - persistent-volume-claim.yaml
+  - deployment.yaml
+  - service.yaml
+
+images:
+  - name: vaultdatum-server
+    newName: registry.example.com/vaultdatum/server
+    newTag: "0.1.0"

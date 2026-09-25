@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: vaultdatum-data
+  labels:
+    app.kubernetes.io/name: vaultdatum-server
+    app.kubernetes.io/part-of: vaultdatum
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 20Gi

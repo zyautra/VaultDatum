@@ -156,9 +156,49 @@ up this volume before an upgrade; do not use `docker compose down -v` in
 production. For Docker, Kubernetes, or another OCI platform, mount persistent
 storage at `/data`.
 
+## Deploy on Kubernetes
+
+`deploy/kubernetes/base` is a Kustomize package for the native OCI image. It
+uses a single-replica `Recreate` Deployment and a `ReadWriteOnce` PVC because
+the authoritative Vault and SQLite database must never be opened by two server
+Pods at the same time.
+
+Build and push an immutable image, then update the Kustomize image reference to
+the registry digest and set a suitable `storageClassName` and PVC size for the
+cluster:
+
+```bash
+./gradlew :server:build \
+  -Dquarkus.native.enabled=true \
+  -Dquarkus.native.container-build=true \
+  -Dquarkus.native.container-runtime=docker \
+  -Dquarkus.package.jar.enabled=false \
+  --no-daemon
+docker build -f server/src/main/docker/Dockerfile.native \
+  -t registry.example.com/vaultdatum/server:0.1.0 server
+docker push registry.example.com/vaultdatum/server:0.1.0
+
+cd deploy/kubernetes/base
+kustomize edit set image \
+  vaultdatum-server=registry.example.com/vaultdatum/server@sha256:REPLACE_ME
+kubectl apply -k .
+kubectl -n vaultdatum rollout status deployment/vaultdatum-server
+```
+
+The optional `deploy/kubernetes/overlays/ingress` overlay is an NGINX Ingress
+example. Replace `vaultdatum.example.com`, the ingress class, and the
+TLS-secret name before applying it; keep the TLS private key out of Git.
+
+VaultDatum does not currently authenticate HTTP clients. Do not expose the
+Ingress publicly until an authenticated reverse proxy, mTLS, or equivalent
+access control is in place. Back up the entire `/data` PVC, including SQLite
+WAL files and the Vault, using a crash-consistent volume snapshot or a planned
+maintenance window.
+
 ## Layout
 
 - `protocol/`: OpenAPI wire contract shared by the server and client.
 - `server/`: Quarkus authoritative-server application.
 - `client/obsidian/`: Obsidian plugin.
 - `compose.yaml`: Single-host example for the native OCI image.
+- `deploy/kubernetes/`: Kustomize manifests for a single authoritative server.

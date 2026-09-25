@@ -1,0 +1,26 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: vaultdatum-server
+  labels:
+    app.kubernetes.io/name: vaultdatum-server
+    app.kubernetes.io/part-of: vaultdatum
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: 9m
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - vaultdatum.example.com
+      secretName: vaultdatum-tls
+  rules:
+    - host: vaultdatum.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: vaultdatum-server
+                port:
+                  name: http
