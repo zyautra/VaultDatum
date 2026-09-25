@@ -53,6 +53,32 @@ For a suspected security vulnerability, do not open a public issue. Contact
 Describe the problem, solution, verification performed, and any known
 limitations in the pull request.
 
+## Commit Messages
+
+Use a concise imperative subject in one of these forms:
+
+```text
+feat(server): add path-state lookup
+fix(client): preserve a conflicted local file
+test(server): cover recovery after restart
+
+feat: synchronize empty directories
+fix: reject an invalid cross-component state
+test: enforce release scenarios
+
+protocol: add a manifest endpoint
+deploy: make Kubernetes base portable
+build: update the native-image build
+docs: clarify initial synchronization
+release: prepare 0.1.0
+chore: bootstrap the repository
+```
+
+Use `(server)` or `(client)` only when a change is confined to that component.
+Cross-component synchronization behavior has no scope. Do not introduce
+ad-hoc scopes such as `(sync)`, `(api)`, or `(k8s)`; use the standalone
+`protocol:` or `deploy:` categories where appropriate.
+
 ## Licensing Contributions
 
 By submitting a pull request, you confirm that you have the right to submit
