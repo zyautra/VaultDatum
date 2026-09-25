@@ -11,6 +11,6 @@ spec:
     app.kubernetes.io/name: vaultdatum-server
   ports:
     - name: http
-      port: 80
+      port: 8080
       protocol: TCP
       targetPort: http

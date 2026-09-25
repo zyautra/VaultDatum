@@ -32,6 +32,9 @@ client/obsidian/yarn-error.log*
 .env.*
 !.env.example
 
+# Cluster-specific deployment overlays (node names, storage paths, private CIDRs)
+deploy/kubernetes/overlays/*-local/
+
 # IDE and operating-system files
 .idea/
 .vscode/

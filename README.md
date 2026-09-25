@@ -158,13 +158,14 @@ storage at `/data`.
 
 ## Deploy on Kubernetes
 
-`deploy/kubernetes/base` is a Kustomize package for the native OCI image. It
-uses a single-replica `Recreate` Deployment and a `ReadWriteOnce` PVC because
-the authoritative Vault and SQLite database must never be opened by two server
-Pods at the same time.
+`deploy/kubernetes/base` is portable: it makes no assumptions about a
+namespace, node, storage path, container registry, service exposure, or private
+network ranges. It deploys one `Recreate` replica, a `ReadWriteOnce` 20 Gi PVC,
+and a `ClusterIP` Service. A cluster with a default dynamic StorageClass can
+provision the PVC directly. For static storage, supply a cluster-specific PV and
+PVC binding in a private overlay.
 
-Build and push an immutable image, then update the Kustomize image reference to
-the registry digest and set a suitable `storageClassName` and PVC size for the
+Build and publish the native OCI image to the registry selected for the target
 cluster:
 
 ```bash
@@ -177,23 +178,40 @@ cluster:
 docker build -f server/src/main/docker/Dockerfile.native \
   -t registry.example.com/vaultdatum/server:0.1.0 server
 docker push registry.example.com/vaultdatum/server:0.1.0
+```
 
-cd deploy/kubernetes/base
-kustomize edit set image \
-  vaultdatum-server=registry.example.com/vaultdatum/server@sha256:REPLACE_ME
-kubectl apply -k .
+Create an organization-specific overlay outside source control (or use a
+separately access-controlled deployment repository). It chooses the namespace,
+image, storage class, ingress or gateway, NetworkPolicy, and—only where needed—a
+static PV. Do not put host paths, node names, private CIDRs, registry
+credentials, or other installation-specific values in this repository.
+
+For example, an overlay's `kustomization.yaml` can set the namespace and image:
+
+```yaml
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: vaultdatum
+resources:
+  - ../../base
+images:
+  - name: vaultdatum-server
+    newName: registry.example.com/vaultdatum/server
+    newTag: "0.1.0"
+```
+
+Apply the overlay and wait for the one authoritative server Pod:
+
+```bash
+kubectl apply -k /secure/deployment-config/vaultdatum
 kubectl -n vaultdatum rollout status deployment/vaultdatum-server
 ```
 
-The optional `deploy/kubernetes/overlays/ingress` overlay is an NGINX Ingress
-example. Replace `vaultdatum.example.com`, the ingress class, and the
-TLS-secret name before applying it; keep the TLS private key out of Git.
-
-VaultDatum does not currently authenticate HTTP clients. Do not expose the
-Ingress publicly until an authenticated reverse proxy, mTLS, or equivalent
-access control is in place. Back up the entire `/data` PVC, including SQLite
-WAL files and the Vault, using a crash-consistent volume snapshot or a planned
-maintenance window.
+VaultDatum does not currently authenticate HTTP clients. Keep its Service
+private, restrict it with the target environment's NetworkPolicy and firewall,
+and do not expose it through a public Gateway. Back up the entire `/data` PVC,
+including SQLite WAL files and the Vault, using a crash-consistent volume
+snapshot or a planned maintenance window.
 
 ## Layout
 
