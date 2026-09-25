@@ -501,9 +501,11 @@ export default class VaultDatumPlugin extends Plugin {
             return;
         }
 
-        const conflicts = await store.conflicts();
+        const conflicts = (await store.conflicts()).filter(
+            (conflict) => conflict.serverState.state === "DELETED",
+        );
         if (conflicts.length === 0) {
-            new Notice("VaultDatum has no conflicts to resolve.");
+            new Notice("VaultDatum has no deleted Server paths to restore.");
             return;
         }
 
