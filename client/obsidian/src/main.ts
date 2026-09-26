@@ -3,6 +3,7 @@ import {
     FuzzySuggestModal,
     Modal,
     Notice,
+    Platform,
     Plugin,
     PluginSettingTab,
     Setting,
@@ -18,6 +19,11 @@ import { ClientStore, type RemoteConflict } from "./storage/client-store";
 import { CreateSync, type SyncSummary } from "./sync/create-sync";
 import { NotificationChannel } from "./sync/notification-channel";
 import type { LocalVault } from "./sync/remote-apply";
+import {
+    SyncScheduler,
+    type SyncActivity,
+    type SyncStatus,
+} from "./sync/sync-scheduler";
 import { ServerClient } from "./transport/server-client";
 
 interface VaultDatumSettings {
@@ -39,6 +45,14 @@ export default class VaultDatumPlugin extends Plugin {
 
     private notificationChannel: NotificationChannel | undefined;
 
+    private syncScheduler: SyncScheduler | undefined;
+
+    private syncStatus: SyncStatus = { kind: "IDLE" };
+
+    private syncStatusBar: HTMLElement | undefined;
+
+    private settingsTab: VaultDatumSettingTab | undefined;
+
     private captureQueue: Promise<void> = Promise.resolve();
 
     public async onload(): Promise<void> {
@@ -50,13 +64,48 @@ export default class VaultDatumPlugin extends Plugin {
             new ObsidianLocalVault(this.app),
             () => this.serverUrl(),
         );
+        this.syncScheduler = new SyncScheduler({
+            run: (mode): Promise<SyncSummary> => {
+                const createSync = this.createSync;
+                if (createSync === undefined) {
+                    return Promise.reject(
+                        new Error("VaultDatum sync is not initialized"),
+                    );
+                }
+                return mode === "FULL"
+                    ? createSync.fullReconcile()
+                    : createSync.sync();
+            },
+            readActivity: async (): Promise<SyncActivity> => {
+                const store = this.store;
+                if (store === undefined) {
+                    return { hasPending: false, hasConflicts: false };
+                }
+                const [pending, conflicts] = await Promise.all([
+                    store.pendingOperations(),
+                    store.conflicts(),
+                ]);
+                return {
+                    hasPending: pending.length > 0,
+                    hasConflicts: conflicts.length > 0,
+                };
+            },
+            isConfigured: (): boolean => this.serverUrl().length > 0,
+            onStatus: (status: SyncStatus): void =>
+                this.updateSyncStatus(status),
+        });
+        if (!Platform.isMobile) {
+            this.syncStatusBar = this.addStatusBarItem();
+            this.updateSyncStatus(this.syncStatus);
+        }
         this.notificationChannel = new NotificationChannel(
             () => this.serverUrl(),
             () => {
                 void this.syncNow(false);
             },
         );
-        this.addSettingTab(new VaultDatumSettingTab(this.app, this));
+        this.settingsTab = new VaultDatumSettingTab(this.app, this);
+        this.addSettingTab(this.settingsTab);
         this.addCommand({
             id: "sync-now",
             name: "Sync now",
@@ -119,9 +168,18 @@ export default class VaultDatumPlugin extends Plugin {
             this.notificationChannel?.start();
             void this.syncNow(false);
         });
+        this.registerDomEvent(window, "online", () => {
+            void this.syncNow(false);
+        });
+        this.registerDomEvent(document, "visibilitychange", () => {
+            if (document.visibilityState === "visible") {
+                void this.syncNow(false);
+            }
+        });
     }
 
     public onunload(): void {
+        this.syncScheduler?.dispose();
         this.notificationChannel?.stop();
         this.store?.close();
     }
@@ -135,6 +193,18 @@ export default class VaultDatumPlugin extends Plugin {
 
     public serverUrl(): string {
         return this.syncSettings.serverUrl.replace(/\/+$/, "");
+    }
+
+    public syncStatusDescription(): string {
+        return syncStatusDescription(this.syncStatus);
+    }
+
+    public async requestManualSync(): Promise<void> {
+        await this.syncNow(true);
+    }
+
+    public async requestFullReconciliation(): Promise<void> {
+        await this.fullReconcile(true);
     }
 
     private observeVaultChanges(): void {
@@ -313,14 +383,14 @@ export default class VaultDatumPlugin extends Plugin {
     }
 
     private async syncNow(showResult: boolean): Promise<void> {
-        const createSync = this.createSync;
+        const scheduler = this.syncScheduler;
 
-        if (createSync === undefined) {
+        if (scheduler === undefined) {
             return;
         }
 
         try {
-            const summary = await createSync.sync();
+            const summary = await scheduler.request();
 
             if (showResult) {
                 this.showSyncResult(summary);
@@ -336,14 +406,14 @@ export default class VaultDatumPlugin extends Plugin {
     }
 
     private async fullReconcile(showResult: boolean): Promise<void> {
-        const createSync = this.createSync;
+        const scheduler = this.syncScheduler;
 
-        if (createSync === undefined) {
+        if (scheduler === undefined) {
             return;
         }
 
         try {
-            const summary = await createSync.fullReconcile();
+            const summary = await scheduler.request("FULL");
 
             if (showResult) {
                 this.showSyncResult(summary);
@@ -718,6 +788,17 @@ export default class VaultDatumPlugin extends Plugin {
         new Notice(`VaultDatum committed ${summary.committed} change(s).`);
     }
 
+    private updateSyncStatus(status: SyncStatus): void {
+        this.syncStatus = status;
+        this.settingsTab?.updateStatusDescription();
+        if (this.syncStatusBar === undefined) {
+            return;
+        }
+
+        this.syncStatusBar.textContent = syncStatusLabel(status);
+        this.syncStatusBar.title = syncStatusDescription(status);
+    }
+
     private async loadSettings(): Promise<void> {
         this.syncSettings = readSettings(await this.loadData());
 
@@ -994,6 +1075,8 @@ class ManualMergeModal extends Modal {
 }
 
 class VaultDatumSettingTab extends PluginSettingTab {
+    private statusDescription: HTMLElement | undefined;
+
     public constructor(
         app: App,
         private readonly plugin: VaultDatumPlugin,
@@ -1015,6 +1098,31 @@ class VaultDatumSettingTab extends PluginSettingTab {
                         await this.plugin.updateServerUrl(value);
                     });
             });
+
+        const synchronization = new Setting(containerEl)
+            .setName("Synchronization")
+            .setDesc(this.plugin.syncStatusDescription())
+            .addButton((button) =>
+                button
+                    .setButtonText("Sync now")
+                    .setCta()
+                    .onClick(() => {
+                        void this.plugin.requestManualSync();
+                    }),
+            )
+            .addButton((button) =>
+                button.setButtonText("Full reconciliation").onClick(() => {
+                    void this.plugin.requestFullReconciliation();
+                }),
+            );
+        this.statusDescription = synchronization.descEl;
+    }
+
+    public updateStatusDescription(): void {
+        if (this.statusDescription !== undefined) {
+            this.statusDescription.textContent =
+                this.plugin.syncStatusDescription();
+        }
     }
 }
 
@@ -1047,4 +1155,53 @@ function conflictCopyPath(path: string): string {
     }
 
     return `${directory}${filename.slice(0, extension)} (conflict copy)${filename.slice(extension)}`;
+}
+
+function syncStatusLabel(status: SyncStatus): string {
+    if (status.kind === "SYNCING") {
+        return "VaultDatum: Syncing";
+    }
+    if (status.kind === "UP_TO_DATE") {
+        return "VaultDatum: Up to date";
+    }
+    if (status.kind === "PENDING") {
+        return "VaultDatum: Pending";
+    }
+    if (status.kind === "OFFLINE") {
+        return "VaultDatum: Offline";
+    }
+    if (status.kind === "CONFLICT") {
+        return "VaultDatum: Conflict";
+    }
+    if (status.kind === "ERROR") {
+        return "VaultDatum: Error";
+    }
+    return "VaultDatum: Ready";
+}
+
+function syncStatusDescription(status: SyncStatus): string {
+    const lastSuccess =
+        status.lastSuccessfulAt === undefined
+            ? ""
+            : ` Last successful sync: ${new Date(status.lastSuccessfulAt).toLocaleString()}.`;
+
+    if (status.kind === "SYNCING") {
+        return "Synchronization is in progress.";
+    }
+    if (status.kind === "UP_TO_DATE") {
+        return `The local Vault is up to date.${lastSuccess}`;
+    }
+    if (status.kind === "PENDING") {
+        return `Some local changes are waiting to be synchronized.${lastSuccess}`;
+    }
+    if (status.kind === "OFFLINE") {
+        return `The server is unavailable. Pending work is kept locally and will retry automatically.${lastSuccess}`;
+    }
+    if (status.kind === "CONFLICT") {
+        return `Some paths need conflict resolution before they can converge.${lastSuccess}`;
+    }
+    if (status.kind === "ERROR") {
+        return `The last synchronization could not complete. Pending work is kept locally.${lastSuccess}`;
+    }
+    return "Ready to synchronize when a server URL is configured.";
 }
