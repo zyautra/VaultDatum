@@ -51,7 +51,13 @@ The Obsidian plugin has a **Server URL** setting. After the plugin has started,
 a new, modified, deleted, renamed, or moved file outside `.obsidian/` is captured as
 a durable operation before it is eligible for upload. Empty directories are also
 captured and applied as first-class entries; non-empty directories are never
-implicitly renamed or deleted recursively. MODIFY and DELETE retain
+implicitly renamed or deleted recursively. Local events, plugin startup, app
+foregrounding, network recovery, server notifications, and retry timers all
+schedule a serialized sync cycle. A trigger that arrives during a cycle causes
+one follow-up cycle, so **Sync now** is an optional manual retry rather than a
+requirement for normal synchronization. The plugin reports `Syncing`, `Up to
+date`, `Pending`, `Offline`, `Conflict`, or `Error` in its desktop status bar
+and settings screen. MODIFY and DELETE retain
 the last replicated revision and content hash as their base condition. A
 same-directory path change is a RENAME; a change of parent directory is a MOVE.
 Both use a PRESENT source base and an UNKNOWN destination base, then commit both
@@ -74,11 +80,16 @@ local content becomes a conflict; it is never overwritten.
 The client also performs a local integrity scan to recover missed file events.
 It compares file hashes against the replica index, durably queues missed local
 modifications and deletions, and quarantines a file that reappears after a
-known server deletion. Files already present when synchronization is first set
-up are retained as an untracked baseline rather than uploaded automatically.
-The **Full reconciliation** command compares that local state and replica index
-with a fresh server manifest; the same manifest recovery runs automatically
-when the incremental journal is no longer available.
+known server deletion. On an initial connection, it first integrates a fresh
+server manifest. Existing server paths are downloaded or recorded as replicas;
+divergent and tombstoned paths become conflicts without overwriting local
+content. Only paths confirmed as server `UNKNOWN` become durable file or empty
+directory CREATE candidates. Existing durable operations are first matched
+against the change journal by operation ID so a lost response is not mistaken
+for an initial-import conflict. The **Full reconciliation** command compares
+local state and the replica index with a fresh server manifest; the same
+manifest recovery runs automatically when the incremental journal is no longer
+available.
 
 Before replacing a local file, a client records a prepared apply intent and
 stores the verified remote bytes as a temporary IndexedDB artifact. On restart,
@@ -99,10 +110,10 @@ latest revision and schedules an ordinary pull-based sync; it never carries
 Vault content or becomes a correctness dependency. Lost, duplicated, or
 delayed notifications therefore do not change synchronization results.
 
-This slice does not yet import an existing Vault or restore a locally recreated
-tombstoned path. RENAME and MOVE changes are applied only when both source and
-destination paths are safe; a divergent local source or destination becomes a
-durable conflict and neither remote effect overwrites local content. The
+An initial import never automatically restores a locally recreated tombstoned
+path. RENAME and MOVE changes are applied only when both source and destination
+paths are safe; a divergent local source or destination becomes a durable
+conflict and neither remote effect overwrites local content. The
 **Resolve conflict: use Server** command lets a user
 explicitly replace one conflicted local file with the latest Server version.
 **Resolve conflict: apply Local** turns a conflicted local file into a new
@@ -176,8 +187,8 @@ cluster:
   -Dquarkus.package.jar.enabled=false \
   --no-daemon
 docker build -f server/src/main/docker/Dockerfile.native \
-  -t registry.example.com/vaultdatum/server:0.1.0 server
-docker push registry.example.com/vaultdatum/server:0.1.0
+  -t registry.example.com/vaultdatum/server:0.2.0 server
+docker push registry.example.com/vaultdatum/server:0.2.0
 ```
 
 Create an organization-specific overlay outside source control (or use a
@@ -197,7 +208,7 @@ resources:
 images:
   - name: vaultdatum-server
     newName: registry.example.com/vaultdatum/server
-    newTag: "0.1.0"
+    newTag: "0.2.0"
 ```
 
 Apply the overlay and wait for the one authoritative server Pod:
