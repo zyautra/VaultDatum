@@ -134,9 +134,10 @@ tombstone. **Resolve conflict: keep Both** keeps the Server file at its
 original path and queues this device's content as a new file at a user-selected
 path. **Resolve conflict: merge manually** presents a color-coded, line-by-line
 Server and local Markdown comparison alongside a distinct editable result. Each
-changed block starts with this device's version and can explicitly select either
-side; on narrow screens, the comparison and result are available through tabs.
-The user-edited result is queued as a new MODIFY operation.
+changed line starts with this device's version and can explicitly select either
+side, including mixed choices within one changed block; on narrow screens, the
+comparison and result are available through tabs. The user-edited result is
+queued as a new MODIFY operation.
 
 The overview offers **Check all files**, conflict review, and redacted
 diagnostic copying. **Reset sync tracking** is available only when no pending

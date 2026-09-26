@@ -120,6 +120,20 @@
     border-left-color: var(--color-green);
 }
 
+.vaultdatum-merge-line-choice {
+    overflow: hidden;
+    border-top: 1px solid var(--background-modifier-border);
+    border-left: 3px solid transparent;
+}
+
+.vaultdatum-merge-line-choice[data-selected-source="SERVER"] {
+    border-left-color: var(--color-red);
+}
+
+.vaultdatum-merge-line-choice[data-selected-source="LOCAL"] {
+    border-left-color: var(--color-green);
+}
+
 .vaultdatum-merge-hunk-header {
     display: flex;
     justify-content: space-between;
@@ -133,6 +147,20 @@
 .vaultdatum-merge-hunk-status {
     color: var(--text-muted);
     font-weight: var(--font-normal);
+}
+
+.vaultdatum-merge-line-choice-header {
+    display: flex;
+    justify-content: space-between;
+    gap: var(--size-4-2);
+    padding: var(--size-2-2) var(--size-4-2);
+    color: var(--text-muted);
+    background: var(--background-primary-alt);
+    font-size: var(--font-ui-small);
+}
+
+.vaultdatum-merge-line-choice-status {
+    white-space: nowrap;
 }
 
 .vaultdatum-merge-diff-column {
@@ -191,6 +219,14 @@
 .vaultdatum-merge-hunk-actions {
     justify-content: flex-end;
     padding: var(--size-4-2);
+    background: var(--background-primary-alt);
+}
+
+.vaultdatum-merge-line-choice-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: var(--size-4-2);
+    padding: var(--size-2-2) var(--size-4-2);
     background: var(--background-primary-alt);
 }
 
@@ -290,6 +326,7 @@
     }
 
     .vaultdatum-merge-hunk-actions button,
+    .vaultdatum-merge-line-choice-actions button,
     .vaultdatum-merge-all-actions button {
         flex: 1 1 0;
     }

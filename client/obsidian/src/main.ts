@@ -20,9 +20,11 @@ import {
     composeManualMergeResult,
     createManualMergeDiff,
     manualMergeChangeBlocks,
+    manualMergeChoiceRows,
     type ManualMergeChangeBlock,
     type ManualMergeDiff,
     type ManualMergeLine,
+    type ManualMergeChoiceRow,
     type ManualMergeSource,
 } from "./core/manual-merge-diff";
 import {
@@ -1702,11 +1704,11 @@ class ManualMergeModal extends Modal {
 
     private generatedResult = "";
 
-    private readonly hunkSelections = new Map<string, ManualMergeSource>();
+    private readonly lineSelections = new Map<string, ManualMergeSource>();
 
-    private readonly hunkStatus = new Map<string, HTMLElement>();
+    private readonly lineStatus = new Map<string, HTMLElement>();
 
-    private readonly hunkViews = new Map<string, HTMLElement>();
+    private readonly lineViews = new Map<string, HTMLElement>();
 
     private saveButton: HTMLButtonElement | undefined;
 
@@ -1725,7 +1727,7 @@ class ManualMergeModal extends Modal {
     ) {
         super(app);
         this.diff = createManualMergeDiff(serverContent, localContent);
-        this.resetHunkSelections("LOCAL");
+        this.resetLineSelections("LOCAL");
     }
 
     public onOpen(): void {
@@ -1755,8 +1757,8 @@ class ManualMergeModal extends Modal {
         this.resultFeedback = undefined;
         this.saveButton = undefined;
         this.cancelButton = undefined;
-        this.hunkStatus.clear();
-        this.hunkViews.clear();
+        this.lineStatus.clear();
+        this.lineViews.clear();
     }
 
     private activatePane(pane: MergePane): void {
@@ -1885,39 +1887,64 @@ class ManualMergeModal extends Modal {
     ): void {
         const hunk = panel.createDiv({
             cls: "vaultdatum-merge-hunk",
-            attr: { "data-selected-source": this.selectedSource(block.id) },
         });
         const header = hunk.createDiv({
             cls: "vaultdatum-merge-hunk-header",
         });
         header.createSpan({ text: `Change ${changeNumber}` });
-        const status = header.createSpan({
+        header.createSpan({
             cls: "vaultdatum-merge-hunk-status",
+            text: `${block.rows.length} line${block.rows.length === 1 ? "" : "s"}`,
         });
-        this.hunkStatus.set(block.id, status);
-        this.hunkViews.set(block.id, hunk);
-        this.updateHunkStatus(block.id);
+        for (const [index, row] of block.rows.entries()) {
+            this.createLineChoiceBlock(hunk, row, index + 1);
+        }
+    }
+
+    private createLineChoiceBlock(
+        hunk: HTMLElement,
+        row: ManualMergeChoiceRow,
+        rowNumber: number,
+    ): void {
+        const lineChoice = hunk.createDiv({
+            cls: "vaultdatum-merge-line-choice",
+            attr: { "data-selected-source": this.selectedSource(row.id) },
+        });
+        const header = lineChoice.createDiv({
+            cls: "vaultdatum-merge-line-choice-header",
+        });
+        header.createSpan({ text: `Line ${rowNumber}` });
+        const status = header.createSpan({
+            cls: "vaultdatum-merge-line-choice-status",
+        });
+        this.lineStatus.set(row.id, status);
+        this.lineViews.set(row.id, lineChoice);
+        this.updateLineStatus(row.id);
         this.createDiffRows(
-            hunk,
-            block.server.lines,
-            block.local.lines,
+            lineChoice,
+            row.server.lines,
+            row.local.lines,
             "CHANGE",
         );
 
-        const actions = hunk.createDiv({
-            cls: "vaultdatum-merge-hunk-actions",
+        const actions = lineChoice.createDiv({
+            cls: "vaultdatum-merge-line-choice-actions",
         });
-        this.createHunkSelectionButton(actions, block.id, "SERVER");
-        this.createHunkSelectionButton(actions, block.id, "LOCAL");
+        this.createLineSelectionButton(actions, row.id, "SERVER");
+        this.createLineSelectionButton(actions, row.id, "LOCAL");
     }
 
     private createLimitedChangeBlock(
         panel: HTMLElement,
         block: ManualMergeChangeBlock,
     ): void {
+        const row = block.rows[0];
+        if (row === undefined) {
+            return;
+        }
         const hunk = panel.createDiv({
             cls: "vaultdatum-merge-hunk",
-            attr: { "data-selected-source": this.selectedSource(block.id) },
+            attr: { "data-selected-source": this.selectedSource(row.id) },
         });
         const header = hunk.createDiv({
             cls: "vaultdatum-merge-hunk-header",
@@ -1926,21 +1953,21 @@ class ManualMergeModal extends Modal {
         const status = header.createSpan({
             cls: "vaultdatum-merge-hunk-status",
         });
-        this.hunkStatus.set(block.id, status);
-        this.hunkViews.set(block.id, hunk);
-        this.updateHunkStatus(block.id);
+        this.lineStatus.set(row.id, status);
+        this.lineViews.set(row.id, hunk);
+        this.updateLineStatus(row.id);
 
         const previews = hunk.createDiv({
             cls: "vaultdatum-merge-source-previews",
         });
-        this.createSourcePreview(previews, "SERVER", block.server.content);
-        this.createSourcePreview(previews, "LOCAL", block.local.content);
+        this.createSourcePreview(previews, "SERVER", row.server.content);
+        this.createSourcePreview(previews, "LOCAL", row.local.content);
 
         const actions = hunk.createDiv({
             cls: "vaultdatum-merge-hunk-actions",
         });
-        this.createHunkSelectionButton(actions, block.id, "SERVER");
-        this.createHunkSelectionButton(actions, block.id, "LOCAL");
+        this.createLineSelectionButton(actions, row.id, "SERVER");
+        this.createLineSelectionButton(actions, row.id, "LOCAL");
     }
 
     private createSourcePreview(
@@ -2022,9 +2049,9 @@ class ManualMergeModal extends Modal {
         this.createDiffRows(context, serverLines, localLines, "EQUAL");
     }
 
-    private createHunkSelectionButton(
+    private createLineSelectionButton(
         actions: HTMLElement,
-        hunkId: string,
+        lineId: string,
         source: ManualMergeSource,
     ): void {
         const sourceName = mergeSourceActionName(source);
@@ -2033,7 +2060,7 @@ class ManualMergeModal extends Modal {
             attr: { type: "button" },
         });
         button.addEventListener("click", () => {
-            this.requestHunkSelection(hunkId, source);
+            this.requestLineSelection(lineId, source);
         });
     }
 
@@ -2103,8 +2130,8 @@ class ManualMergeModal extends Modal {
         return this.result?.value !== this.generatedResult;
     }
 
-    private requestHunkSelection(
-        hunkId: string,
+    private requestLineSelection(
+        lineId: string,
         source: ManualMergeSource,
     ): void {
         if (this.saving) {
@@ -2112,10 +2139,10 @@ class ManualMergeModal extends Modal {
         }
         const sourceName = mergeSourceActionName(source);
         this.requestGeneratedResultReplacement(
-            `Use ${sourceName} for this change? Your unsaved result text will be replaced by a result rebuilt from the selected changes.`,
+            `Use ${sourceName} for this line? Your unsaved result text will be replaced by a result rebuilt from the selected lines.`,
             `Use ${sourceName}`,
             () => {
-                this.hunkSelections.set(hunkId, source);
+                this.lineSelections.set(lineId, source);
                 this.replaceResultWithSelections();
             },
         );
@@ -2130,7 +2157,7 @@ class ManualMergeModal extends Modal {
             `Use all content from ${sourceName} as the result? Your unsaved result text will be replaced by that version.`,
             `Use all from ${sourceName}`,
             () => {
-                this.resetHunkSelections(source);
+                this.resetLineSelections(source);
                 this.replaceResultWithSelections(true);
             },
         );
@@ -2162,11 +2189,11 @@ class ManualMergeModal extends Modal {
 
         this.generatedResult = composeManualMergeResult(
             this.diff,
-            this.hunkSelections,
+            this.lineSelections,
         );
         result.value = this.generatedResult;
-        for (const change of manualMergeChangeBlocks(this.diff)) {
-            this.updateHunkStatus(change.id);
+        for (const line of manualMergeChoiceRows(this.diff)) {
+            this.updateLineStatus(line.id);
         }
         this.updateResultFeedback();
         if (focusResult) {
@@ -2175,28 +2202,28 @@ class ManualMergeModal extends Modal {
         }
     }
 
-    private resetHunkSelections(source: ManualMergeSource): void {
-        this.hunkSelections.clear();
-        for (const change of manualMergeChangeBlocks(this.diff)) {
-            this.hunkSelections.set(change.id, source);
+    private resetLineSelections(source: ManualMergeSource): void {
+        this.lineSelections.clear();
+        for (const line of manualMergeChoiceRows(this.diff)) {
+            this.lineSelections.set(line.id, source);
         }
         this.generatedResult = composeManualMergeResult(
             this.diff,
-            this.hunkSelections,
+            this.lineSelections,
         );
     }
 
-    private selectedSource(hunkId: string): ManualMergeSource {
-        return this.hunkSelections.get(hunkId) ?? "LOCAL";
+    private selectedSource(lineId: string): ManualMergeSource {
+        return this.lineSelections.get(lineId) ?? "LOCAL";
     }
 
-    private updateHunkStatus(hunkId: string): void {
-        const source = this.selectedSource(hunkId);
-        this.hunkStatus
-            .get(hunkId)
+    private updateLineStatus(lineId: string): void {
+        const source = this.selectedSource(lineId);
+        this.lineStatus
+            .get(lineId)
             ?.setText(`Using ${mergeSourceActionName(source)}`);
-        this.hunkViews
-            .get(hunkId)
+        this.lineViews
+            .get(lineId)
             ?.setAttribute("data-selected-source", source);
     }
 
@@ -2235,9 +2262,9 @@ class ManualMergeModal extends Modal {
             );
             return;
         }
-        const changes = manualMergeChangeBlocks(this.diff);
-        const serverChoiceCount = changes.filter(
-            (change) => this.selectedSource(change.id) === "SERVER",
+        const lines = manualMergeChoiceRows(this.diff);
+        const serverChoiceCount = lines.filter(
+            (line) => this.selectedSource(line.id) === "SERVER",
         ).length;
         if (serverChoiceCount === 0) {
             this.resultFeedback?.setText(
@@ -2246,7 +2273,7 @@ class ManualMergeModal extends Modal {
             return;
         }
         this.resultFeedback?.setText(
-            serverChoiceCount === changes.length
+            serverChoiceCount === lines.length
                 ? "Result uses the Server version."
                 : "Result combines selected Server and this device changes.",
         );

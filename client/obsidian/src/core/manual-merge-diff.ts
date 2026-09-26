@@ -14,6 +14,12 @@ interface ManualMergeFragment {
     readonly lines: readonly ManualMergeLine[];
 }
 
+export interface ManualMergeChoiceRow {
+    readonly id: string;
+    readonly server: ManualMergeFragment;
+    readonly local: ManualMergeFragment;
+}
+
 interface ManualMergeEqualBlock {
     readonly kind: "EQUAL";
     readonly server: ManualMergeFragment;
@@ -25,6 +31,7 @@ export interface ManualMergeChangeBlock {
     readonly kind: "CHANGE";
     readonly server: ManualMergeFragment;
     readonly local: ManualMergeFragment;
+    readonly rows: readonly ManualMergeChoiceRow[];
 }
 
 export type ManualMergeDiffBlock =
@@ -57,15 +64,23 @@ export function createManualMergeDiff(
         if (pendingServer.length === 0 && pendingLocal.length === 0) {
             return;
         }
+        const id = `change-${changeId++}`;
         const server = createFragment(pendingServer, serverLine);
         const local = createFragment(pendingLocal, localLine);
         serverLine += server.lines.length;
         localLine += local.lines.length;
         blocks.push({
-            id: `change-${changeId++}`,
+            id,
             kind: "CHANGE",
             server,
             local,
+            rows: createChoiceRows(
+                id,
+                pendingServer,
+                pendingLocal,
+                serverLine - server.lines.length,
+                localLine - local.lines.length,
+            ),
         });
         pendingServer = "";
         pendingLocal = "";
@@ -102,9 +117,13 @@ export function composeManualMergeResult(
             if (block.kind === "EQUAL") {
                 return block.local.content;
             }
-            return (selections.get(block.id) ?? "LOCAL") === "SERVER"
-                ? block.server.content
-                : block.local.content;
+            return block.rows
+                .map((row) =>
+                    (selections.get(row.id) ?? "LOCAL") === "SERVER"
+                        ? row.server.content
+                        : row.local.content,
+                )
+                .join("");
         })
         .join("");
 }
@@ -115,6 +134,12 @@ export function manualMergeChangeBlocks(
     return diff.blocks.filter(
         (block): block is ManualMergeChangeBlock => block.kind === "CHANGE",
     );
+}
+
+export function manualMergeChoiceRows(
+    diff: ManualMergeDiff,
+): readonly ManualMergeChoiceRow[] {
+    return manualMergeChangeBlocks(diff).flatMap((block) => block.rows);
 }
 
 function createFragment(
@@ -141,10 +166,46 @@ function createSingleChangeDiff(
                 kind: "CHANGE",
                 server: createFragment(serverContent, 1),
                 local: createFragment(localContent, 1),
+                rows: [
+                    {
+                        id: "change-0-line-0",
+                        server: createFragment(serverContent, 1),
+                        local: createFragment(localContent, 1),
+                    },
+                ],
             },
         ],
         limited: true,
     };
+}
+
+function createChoiceRows(
+    changeId: string,
+    serverContent: string,
+    localContent: string,
+    firstServerLine: number,
+    firstLocalLine: number,
+): readonly ManualMergeChoiceRow[] {
+    const serverLines = lineFragments(serverContent);
+    const localLines = lineFragments(localContent);
+    const rows: ManualMergeChoiceRow[] = [];
+    let serverLine = firstServerLine;
+    let localLine = firstLocalLine;
+    const rowCount = Math.max(serverLines.length, localLines.length);
+    for (let index = 0; index < rowCount; index += 1) {
+        const serverContentForRow = serverLines[index] ?? "";
+        const localContentForRow = localLines[index] ?? "";
+        const server = createFragment(serverContentForRow, serverLine);
+        const local = createFragment(localContentForRow, localLine);
+        serverLine += server.lines.length;
+        localLine += local.lines.length;
+        rows.push({
+            id: `${changeId}-line-${index}`,
+            server,
+            local,
+        });
+    }
+    return rows;
 }
 
 function displayLines(content: string): readonly string[] {
@@ -155,4 +216,8 @@ function displayLines(content: string): readonly string[] {
     const normalized = content.replace(/\r\n?/g, "\n");
     const lines = normalized.split("\n");
     return normalized.endsWith("\n") ? lines.slice(0, -1) : lines;
+}
+
+function lineFragments(content: string): readonly string[] {
+    return content.match(/[^\r\n]*(?:\r\n|\r|\n|$)/g)?.filter(Boolean) ?? [];
 }
