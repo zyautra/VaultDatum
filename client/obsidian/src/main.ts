@@ -1706,9 +1706,20 @@ class ManualMergeModal extends Modal {
 
     private readonly lineSelections = new Map<string, ManualMergeSource>();
 
-    private readonly lineStatus = new Map<string, HTMLElement>();
-
     private readonly lineViews = new Map<string, HTMLElement>();
+
+    private readonly lineSelectionIndicators = new Map<string, HTMLElement>();
+
+    private mobileSelectedLineId: string | undefined;
+
+    private mobileSelectedLineLabel: string | undefined;
+
+    private mobileSelectionDescription: HTMLElement | undefined;
+
+    private readonly mobileSelectionButtons = new Map<
+        ManualMergeSource,
+        HTMLButtonElement
+    >();
 
     private saveButton: HTMLButtonElement | undefined;
 
@@ -1732,6 +1743,10 @@ class ManualMergeModal extends Modal {
 
     public onOpen(): void {
         this.modalEl.classList.add("vaultdatum-merge-modal");
+        this.modalEl.classList.toggle(
+            "vaultdatum-merge-mobile-platform",
+            Platform.isMobile,
+        );
         this.contentEl.classList.add("vaultdatum-merge-content");
         this.setTitle("Resolve conflict");
         this.contentEl.createDiv({
@@ -1751,14 +1766,19 @@ class ManualMergeModal extends Modal {
     public onClose(): void {
         this.contentEl.empty();
         this.modalEl.classList.remove("vaultdatum-merge-modal");
+        this.modalEl.classList.remove("vaultdatum-merge-mobile-platform");
         this.tabButtons.clear();
         this.workspace = undefined;
         this.result = undefined;
         this.resultFeedback = undefined;
         this.saveButton = undefined;
         this.cancelButton = undefined;
-        this.lineStatus.clear();
         this.lineViews.clear();
+        this.lineSelectionIndicators.clear();
+        this.mobileSelectedLineId = undefined;
+        this.mobileSelectedLineLabel = undefined;
+        this.mobileSelectionDescription = undefined;
+        this.mobileSelectionButtons.clear();
     }
 
     private activatePane(pane: MergePane): void {
@@ -1834,7 +1854,7 @@ class ManualMergeModal extends Modal {
         panel.createEl("h3", { text: "Line-by-line changes" });
         panel.createEl("p", {
             cls: "vaultdatum-merge-panel-description",
-            text: "Each change starts with this device's version. Choose a side for any change you want to replace.",
+            text: "Each change starts with this device's version. On desktop, select the version you want to use. On mobile, select a line and then choose its version below.",
         });
         const allActions = panel.createDiv({
             cls: "vaultdatum-merge-all-actions",
@@ -1858,6 +1878,10 @@ class ManualMergeModal extends Modal {
             cls: "vaultdatum-merge-diff-headings",
         });
         headings.createDiv({ text: "Server version" });
+        headings.createDiv({
+            cls: "vaultdatum-merge-diff-heading-gutter",
+            text: "Use",
+        });
         headings.createDiv({ text: "This device's version" });
 
         let changeNumber = 0;
@@ -1877,7 +1901,9 @@ class ManualMergeModal extends Modal {
                 cls: "vaultdatum-merge-no-changes",
                 text: "No line differences were found. You can still edit the merged result.",
             });
+            return;
         }
+        this.createMobileLineSelectionBar(panel);
     }
 
     private createChangeBlock(
@@ -1897,41 +1923,26 @@ class ManualMergeModal extends Modal {
             text: `${block.rows.length} line${block.rows.length === 1 ? "" : "s"}`,
         });
         for (const [index, row] of block.rows.entries()) {
-            this.createLineChoiceBlock(hunk, row, index + 1);
+            this.createLineChoiceBlock(
+                hunk,
+                row,
+                `Change ${changeNumber}, line ${index + 1}`,
+            );
         }
     }
 
     private createLineChoiceBlock(
         hunk: HTMLElement,
         row: ManualMergeChoiceRow,
-        rowNumber: number,
+        lineLabel: string,
     ): void {
         const lineChoice = hunk.createDiv({
             cls: "vaultdatum-merge-line-choice",
             attr: { "data-selected-source": this.selectedSource(row.id) },
         });
-        const header = lineChoice.createDiv({
-            cls: "vaultdatum-merge-line-choice-header",
-        });
-        header.createSpan({ text: `Line ${rowNumber}` });
-        const status = header.createSpan({
-            cls: "vaultdatum-merge-line-choice-status",
-        });
-        this.lineStatus.set(row.id, status);
         this.lineViews.set(row.id, lineChoice);
-        this.updateLineStatus(row.id);
-        this.createDiffRows(
-            lineChoice,
-            row.server.lines,
-            row.local.lines,
-            "CHANGE",
-        );
-
-        const actions = lineChoice.createDiv({
-            cls: "vaultdatum-merge-line-choice-actions",
-        });
-        this.createLineSelectionButton(actions, row.id, "SERVER");
-        this.createLineSelectionButton(actions, row.id, "LOCAL");
+        this.createChoiceDiffRows(lineChoice, row, lineLabel);
+        this.updateLineSelection(row.id);
     }
 
     private createLimitedChangeBlock(
@@ -1950,12 +1961,8 @@ class ManualMergeModal extends Modal {
             cls: "vaultdatum-merge-hunk-header",
         });
         header.createSpan({ text: "Complete document" });
-        const status = header.createSpan({
-            cls: "vaultdatum-merge-hunk-status",
-        });
-        this.lineStatus.set(row.id, status);
         this.lineViews.set(row.id, hunk);
-        this.updateLineStatus(row.id);
+        this.updateLineSelection(row.id);
 
         const previews = hunk.createDiv({
             cls: "vaultdatum-merge-source-previews",
@@ -2003,6 +2010,38 @@ class ManualMergeModal extends Modal {
         this.createDiffColumn(rows, localLines, "LOCAL", kind);
     }
 
+    private createChoiceDiffRows(
+        container: HTMLElement,
+        row: ManualMergeChoiceRow,
+        lineLabel: string,
+    ): void {
+        const rows = container.createDiv({
+            cls: "vaultdatum-merge-diff-rows vaultdatum-merge-diff-change vaultdatum-merge-diff-choice",
+        });
+        this.createSelectableDiffColumn(
+            rows,
+            row.server.lines,
+            "SERVER",
+            row.id,
+            lineLabel,
+        );
+        const gutter = rows.createDiv({
+            cls: "vaultdatum-merge-line-gutter",
+            attr: { "aria-hidden": "true" },
+        });
+        const indicator = gutter.createSpan({
+            cls: "vaultdatum-merge-line-selection-indicator",
+        });
+        this.lineSelectionIndicators.set(row.id, indicator);
+        this.createSelectableDiffColumn(
+            rows,
+            row.local.lines,
+            "LOCAL",
+            row.id,
+            lineLabel,
+        );
+    }
+
     private createDiffColumn(
         container: HTMLElement,
         lines: readonly ManualMergeLine[],
@@ -2012,6 +2051,60 @@ class ManualMergeModal extends Modal {
         const column = container.createDiv({
             cls: `vaultdatum-merge-diff-column vaultdatum-merge-diff-${source.toLowerCase()}`,
         });
+        this.populateDiffColumn(column, lines, source, kind);
+    }
+
+    private createSelectableDiffColumn(
+        container: HTMLElement,
+        lines: readonly ManualMergeLine[],
+        source: ManualMergeSource,
+        lineId: string,
+        lineLabel: string,
+    ): void {
+        const sourceName = mergeSourceActionName(source);
+        const className = `vaultdatum-merge-diff-column vaultdatum-merge-diff-${source.toLowerCase()} vaultdatum-merge-selectable-source`;
+        if (Platform.isMobile) {
+            const column = container.createDiv({
+                cls: className,
+                attr: {
+                    role: "button",
+                    tabindex: "0",
+                    "aria-label": `Select ${lineLabel}. ${sourceName} version is shown.`,
+                },
+            });
+            const select = (): void => this.selectMobileLine(lineId, lineLabel);
+            column.addEventListener("click", select);
+            column.addEventListener("keydown", (event) => {
+                if (event.key === "Enter" || event.key === " ") {
+                    event.preventDefault();
+                    select();
+                }
+            });
+            this.populateDiffColumn(column, lines, source, "CHANGE");
+            return;
+        }
+
+        const column = container.createEl("button", {
+            cls: className,
+            attr: {
+                type: "button",
+                "data-merge-select-source": source,
+                "aria-label": `Use ${sourceName} version for ${lineLabel}`,
+                title: `Use ${sourceName} version for ${lineLabel}`,
+            },
+        });
+        column.addEventListener("click", () => {
+            this.requestLineSelection(lineId, source);
+        });
+        this.populateDiffColumn(column, lines, source, "CHANGE");
+    }
+
+    private populateDiffColumn(
+        column: HTMLElement,
+        lines: readonly ManualMergeLine[],
+        source: ManualMergeSource,
+        kind: "CHANGE" | "EQUAL",
+    ): void {
         if (lines.length === 0) {
             column.createDiv({
                 cls: "vaultdatum-merge-diff-empty",
@@ -2062,6 +2155,40 @@ class ManualMergeModal extends Modal {
         button.addEventListener("click", () => {
             this.requestLineSelection(lineId, source);
         });
+    }
+
+    private createMobileLineSelectionBar(panel: HTMLElement): void {
+        const bar = panel.createDiv({
+            cls: "vaultdatum-merge-mobile-line-actions",
+            attr: {
+                role: "group",
+                "aria-label": "Selected changed line",
+            },
+        });
+        this.mobileSelectionDescription = bar.createDiv({
+            cls: "vaultdatum-merge-mobile-line-description",
+            attr: { "aria-live": "polite" },
+        });
+        const actions = bar.createDiv({
+            cls: "vaultdatum-merge-mobile-line-action-buttons",
+        });
+        for (const source of ["SERVER", "LOCAL"] as const) {
+            const sourceName = mergeSourceActionName(source);
+            const button = actions.createEl("button", {
+                text: `Use ${sourceName}`,
+                attr: { type: "button" },
+            });
+            button.addEventListener("click", () => {
+                if (this.mobileSelectedLineId !== undefined) {
+                    this.requestLineSelection(
+                        this.mobileSelectedLineId,
+                        source,
+                    );
+                }
+            });
+            this.mobileSelectionButtons.set(source, button);
+        }
+        this.updateMobileLineSelectionBar();
     }
 
     private createSourceSelectionButton(
@@ -2193,7 +2320,7 @@ class ManualMergeModal extends Modal {
         );
         result.value = this.generatedResult;
         for (const line of manualMergeChoiceRows(this.diff)) {
-            this.updateLineStatus(line.id);
+            this.updateLineSelection(line.id);
         }
         this.updateResultFeedback();
         if (focusResult) {
@@ -2217,14 +2344,49 @@ class ManualMergeModal extends Modal {
         return this.lineSelections.get(lineId) ?? "LOCAL";
     }
 
-    private updateLineStatus(lineId: string): void {
-        const source = this.selectedSource(lineId);
-        this.lineStatus
+    private selectMobileLine(lineId: string, lineLabel: string): void {
+        if (this.saving || this.mobileSelectedLineId === lineId) {
+            return;
+        }
+        this.lineViews
+            .get(this.mobileSelectedLineId ?? "")
+            ?.removeAttribute("data-mobile-selected");
+        this.mobileSelectedLineId = lineId;
+        this.mobileSelectedLineLabel = lineLabel;
+        this.lineViews
             .get(lineId)
-            ?.setText(`Using ${mergeSourceActionName(source)}`);
+            ?.setAttribute("data-mobile-selected", "true");
+        this.updateMobileLineSelectionBar();
+    }
+
+    private updateLineSelection(lineId: string): void {
+        const source = this.selectedSource(lineId);
         this.lineViews
             .get(lineId)
             ?.setAttribute("data-selected-source", source);
+        this.lineSelectionIndicators
+            .get(lineId)
+            ?.setText(source === "SERVER" ? "←" : "→");
+        for (const candidate of ["SERVER", "LOCAL"] as const) {
+            this.lineViews
+                .get(lineId)
+                ?.querySelector<HTMLButtonElement>(
+                    `[data-merge-select-source="${candidate}"]`,
+                )
+                ?.setAttribute("aria-pressed", String(candidate === source));
+        }
+    }
+
+    private updateMobileLineSelectionBar(): void {
+        const hasSelectedLine = this.mobileSelectedLineId !== undefined;
+        this.mobileSelectionDescription?.setText(
+            hasSelectedLine
+                ? `${this.mobileSelectedLineLabel ?? "Changed line"} selected. Choose a version to use.`
+                : "Select a changed line to choose its version.",
+        );
+        for (const button of this.mobileSelectionButtons.values()) {
+            button.toggleAttribute("disabled", this.saving || !hasSelectedLine);
+        }
     }
 
     private async saveResult(): Promise<void> {
@@ -2285,6 +2447,7 @@ class ManualMergeModal extends Modal {
         );
         this.saveButton?.toggleAttribute("disabled", this.saving);
         this.cancelButton?.toggleAttribute("disabled", this.saving);
+        this.updateMobileLineSelectionBar();
     }
 }
 

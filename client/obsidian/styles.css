@@ -64,7 +64,12 @@
     color: var(--text-warning);
 }
 
-.vaultdatum-merge-diff-headings,
+.vaultdatum-merge-diff-headings {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 3rem minmax(0, 1fr);
+    gap: var(--size-4-2);
+}
+
 .vaultdatum-merge-diff-rows {
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -76,6 +81,10 @@
     color: var(--text-muted);
     font-size: var(--font-ui-small);
     font-weight: var(--font-semibold);
+}
+
+.vaultdatum-merge-diff-heading-gutter {
+    text-align: center;
 }
 
 .vaultdatum-merge-source-previews {
@@ -123,15 +132,52 @@
 .vaultdatum-merge-line-choice {
     overflow: hidden;
     border-top: 1px solid var(--background-modifier-border);
-    border-left: 3px solid transparent;
 }
 
-.vaultdatum-merge-line-choice[data-selected-source="SERVER"] {
-    border-left-color: var(--color-red);
+.vaultdatum-merge-diff-choice {
+    grid-template-columns: minmax(0, 1fr) 3rem minmax(0, 1fr);
+    gap: 0;
 }
 
-.vaultdatum-merge-line-choice[data-selected-source="LOCAL"] {
-    border-left-color: var(--color-green);
+.vaultdatum-merge-line-gutter {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 0;
+    color: var(--text-faint);
+    background: var(--background-primary-alt);
+}
+
+.vaultdatum-merge-line-selection-indicator {
+    display: grid;
+    width: 1.5em;
+    height: 1.5em;
+    place-items: center;
+    border: 1px solid currentcolor;
+    border-radius: var(--radius-s);
+    font-weight: var(--font-semibold);
+}
+
+.vaultdatum-merge-line-choice[data-selected-source="SERVER"]
+    .vaultdatum-merge-diff-server {
+    box-shadow: inset 0 0 0 2px var(--color-red);
+}
+
+.vaultdatum-merge-line-choice[data-selected-source="LOCAL"]
+    .vaultdatum-merge-diff-local {
+    box-shadow: inset 0 0 0 2px var(--color-green);
+}
+
+.vaultdatum-merge-line-choice[data-selected-source="SERVER"]
+    .vaultdatum-merge-line-gutter {
+    color: var(--color-red);
+    background: var(--background-modifier-error);
+}
+
+.vaultdatum-merge-line-choice[data-selected-source="LOCAL"]
+    .vaultdatum-merge-line-gutter {
+    color: var(--color-green);
+    background: var(--background-modifier-success);
 }
 
 .vaultdatum-merge-hunk-header {
@@ -149,23 +195,39 @@
     font-weight: var(--font-normal);
 }
 
-.vaultdatum-merge-line-choice-header {
-    display: flex;
-    justify-content: space-between;
-    gap: var(--size-4-2);
-    padding: var(--size-2-2) var(--size-4-2);
-    color: var(--text-muted);
-    background: var(--background-primary-alt);
-    font-size: var(--font-ui-small);
-}
-
-.vaultdatum-merge-line-choice-status {
-    white-space: nowrap;
-}
-
 .vaultdatum-merge-diff-column {
     min-width: 0;
     background: var(--background-primary);
+}
+
+.vaultdatum-merge-selectable-source {
+    display: block;
+    width: 100%;
+    padding: 0;
+    border: 0;
+    border-radius: 0;
+    color: inherit;
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+}
+
+.vaultdatum-merge-selectable-source:focus-visible {
+    position: relative;
+    z-index: 1;
+    outline: 2px solid var(--interactive-accent);
+    outline-offset: -2px;
+}
+
+@media (hover: hover) {
+    .vaultdatum-merge-selectable-source:hover {
+        filter: brightness(1.08);
+    }
+
+    .vaultdatum-merge-line-choice:not(:hover):not(:focus-within)
+        .vaultdatum-merge-line-gutter {
+        opacity: 0.64;
+    }
 }
 
 .vaultdatum-merge-diff-change .vaultdatum-merge-diff-server {
@@ -222,12 +284,8 @@
     background: var(--background-primary-alt);
 }
 
-.vaultdatum-merge-line-choice-actions {
-    display: flex;
-    justify-content: flex-end;
-    gap: var(--size-4-2);
-    padding: var(--size-2-2) var(--size-4-2);
-    background: var(--background-primary-alt);
+.vaultdatum-merge-mobile-line-actions {
+    display: none;
 }
 
 .vaultdatum-merge-context {
@@ -304,6 +362,19 @@
         grid-template-columns: minmax(0, 1fr);
     }
 
+    .vaultdatum-merge-diff-choice {
+        gap: var(--size-2-2);
+    }
+
+    .vaultdatum-merge-line-gutter {
+        display: none;
+    }
+
+    .vaultdatum-merge-line-choice[data-mobile-selected="true"] {
+        outline: 2px solid var(--interactive-accent);
+        outline-offset: -2px;
+    }
+
     .vaultdatum-merge-diff-column::before {
         display: block;
         padding: var(--size-2-2) var(--size-4-2);
@@ -326,9 +397,34 @@
     }
 
     .vaultdatum-merge-hunk-actions button,
-    .vaultdatum-merge-line-choice-actions button,
+    .vaultdatum-merge-mobile-line-action-buttons button,
     .vaultdatum-merge-all-actions button {
         flex: 1 1 0;
+    }
+
+    .modal.vaultdatum-merge-mobile-platform
+        .vaultdatum-merge-mobile-line-actions {
+        position: sticky;
+        bottom: 0;
+        z-index: 1;
+        display: grid;
+        gap: var(--size-2-2);
+        margin-top: var(--size-4-3);
+        padding: var(--size-4-2);
+        border: 1px solid var(--background-modifier-border);
+        border-radius: var(--radius-s);
+        background: var(--background-secondary);
+        box-shadow: 0 -4px 12px var(--background-primary-alt);
+    }
+
+    .vaultdatum-merge-mobile-line-description {
+        color: var(--text-muted);
+        font-size: var(--font-ui-small);
+    }
+
+    .vaultdatum-merge-mobile-line-action-buttons {
+        display: flex;
+        gap: var(--size-2-2);
     }
 
     .vaultdatum-merge-editor {
