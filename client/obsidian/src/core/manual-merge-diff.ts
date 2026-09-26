@@ -14,6 +14,11 @@ interface ManualMergeFragment {
     readonly lines: readonly ManualMergeLine[];
 }
 
+interface ManualMergeResultFragment {
+    readonly content: string;
+    readonly fallbackLineEnding: string | undefined;
+}
+
 export interface ManualMergeChoiceRow {
     readonly id: string;
     readonly server: ManualMergeFragment;
@@ -112,20 +117,30 @@ export function composeManualMergeResult(
     diff: ManualMergeDiff,
     selections: ReadonlyMap<string, ManualMergeSource>,
 ): string {
-    return diff.blocks
-        .map((block) => {
-            if (block.kind === "EQUAL") {
-                return block.local.content;
-            }
-            return block.rows
-                .map((row) =>
-                    (selections.get(row.id) ?? "LOCAL") === "SERVER"
-                        ? row.server.content
-                        : row.local.content,
-                )
-                .join("");
-        })
-        .join("");
+    const fragments = diff.blocks.flatMap((block) => {
+        if (block.kind === "EQUAL") {
+            return [
+                {
+                    content: block.local.content,
+                    fallbackLineEnding: trailingLineEnding(block.local.content),
+                },
+            ];
+        }
+        return block.rows.map((row) => {
+            const source = selections.get(row.id) ?? "LOCAL";
+            const selected =
+                source === "SERVER" ? row.server.content : row.local.content;
+            const other =
+                source === "SERVER" ? row.local.content : row.server.content;
+            return {
+                content: selected,
+                fallbackLineEnding:
+                    trailingLineEnding(selected) ?? trailingLineEnding(other),
+            };
+        });
+    });
+
+    return joinManualMergeFragments(fragments);
 }
 
 export function manualMergeChangeBlocks(
@@ -220,4 +235,48 @@ function displayLines(content: string): readonly string[] {
 
 function lineFragments(content: string): readonly string[] {
     return content.match(/[^\r\n]*(?:\r\n|\r|\n|$)/g)?.filter(Boolean) ?? [];
+}
+
+function joinManualMergeFragments(
+    fragments: readonly ManualMergeResultFragment[],
+): string {
+    let result = "";
+    let previous: ManualMergeResultFragment | undefined;
+
+    for (const fragment of fragments) {
+        if (fragment.content.length === 0) {
+            continue;
+        }
+        if (
+            previous !== undefined &&
+            !endsWithLineEnding(result) &&
+            !startsWithLineEnding(fragment.content)
+        ) {
+            result += previous.fallbackLineEnding ?? "\n";
+        }
+        result += fragment.content;
+        previous = fragment;
+    }
+    return result;
+}
+
+function trailingLineEnding(content: string): string | undefined {
+    if (content.endsWith("\r\n")) {
+        return "\r\n";
+    }
+    if (content.endsWith("\n")) {
+        return "\n";
+    }
+    if (content.endsWith("\r")) {
+        return "\r";
+    }
+    return undefined;
+}
+
+function endsWithLineEnding(content: string): boolean {
+    return content.endsWith("\r") || content.endsWith("\n");
+}
+
+function startsWithLineEnding(content: string): boolean {
+    return content.startsWith("\r") || content.startsWith("\n");
 }

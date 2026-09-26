@@ -92,4 +92,35 @@ void (async (): Promise<void> => {
         ),
         "server first\nserver second\n",
     );
+
+    const missingFinalNewline = createManualMergeDiff(
+        "server first\nserver second\n",
+        "device first",
+    );
+    const missingFinalNewlineRows = manualMergeChoiceRows(missingFinalNewline);
+    assert.equal(missingFinalNewlineRows.length, 2);
+    assert.equal(
+        composeManualMergeResult(
+            missingFinalNewline,
+            new Map([[missingFinalNewlineRows[1]?.id ?? "", "SERVER"]]),
+        ),
+        "device first\nserver second\n",
+    );
+    assert.equal(
+        composeManualMergeResult(missingFinalNewline, new Map()),
+        "device first",
+    );
+
+    const missingFinalCrLf = createManualMergeDiff(
+        "server first\r\nserver second\r\n",
+        "device first",
+    );
+    const missingFinalCrLfRows = manualMergeChoiceRows(missingFinalCrLf);
+    assert.equal(
+        composeManualMergeResult(
+            missingFinalCrLf,
+            new Map([[missingFinalCrLfRows[1]?.id ?? "", "SERVER"]]),
+        ),
+        "device first\r\nserver second\r\n",
+    );
 })();
