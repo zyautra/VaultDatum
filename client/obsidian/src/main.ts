@@ -17,6 +17,15 @@ import {
     MAX_SYNC_CONTENT_BYTES,
 } from "./core/content-limits";
 import {
+    composeManualMergeResult,
+    createManualMergeDiff,
+    manualMergeChangeBlocks,
+    type ManualMergeChangeBlock,
+    type ManualMergeDiff,
+    type ManualMergeLine,
+    type ManualMergeSource,
+} from "./core/manual-merge-diff";
+import {
     ClientStore,
     type ClientSyncActivity,
     type RemoteConflict,
@@ -1663,33 +1672,25 @@ class KeepBothDestinationModal extends Modal {
     }
 }
 
-type MergePane = "SERVER" | "LOCAL" | "RESULT";
+type MergePane = "CHANGES" | "RESULT";
 
-type MergeSource = Exclude<MergePane, "RESULT">;
-
-const MERGE_PANES: readonly MergePane[] = ["SERVER", "LOCAL", "RESULT"];
+const MERGE_PANES: readonly MergePane[] = ["CHANGES", "RESULT"];
 
 function mergePaneName(pane: MergePane): string {
     switch (pane) {
-        case "SERVER":
-            return "Server";
-        case "LOCAL":
-            return "This device";
+        case "CHANGES":
+            return "Changes";
         case "RESULT":
             return "Merged result";
     }
 }
 
-function mergeSourceActionName(source: MergeSource): string {
-    return source === "SERVER" ? "Server version" : "this device's version";
-}
-
-function mergeSourceName(source: MergeSource): string {
-    return source === "SERVER" ? "Server version" : "This device's version";
+function mergeSourceActionName(source: ManualMergeSource): string {
+    return source === "SERVER" ? "Server" : "this device";
 }
 
 class ManualMergeModal extends Modal {
-    private activePane: MergePane = "RESULT";
+    private activePane: MergePane = "CHANGES";
 
     private cancelButton: HTMLButtonElement | undefined;
 
@@ -1697,9 +1698,15 @@ class ManualMergeModal extends Modal {
 
     private resultFeedback: HTMLElement | undefined;
 
-    private resultSelection: MergeSource = "LOCAL";
+    private readonly diff: ManualMergeDiff;
 
-    private resultSelectionContent = "";
+    private generatedResult = "";
+
+    private readonly hunkSelections = new Map<string, ManualMergeSource>();
+
+    private readonly hunkStatus = new Map<string, HTMLElement>();
+
+    private readonly hunkViews = new Map<string, HTMLElement>();
 
     private saveButton: HTMLButtonElement | undefined;
 
@@ -1717,6 +1724,8 @@ class ManualMergeModal extends Modal {
         private readonly save: (mergedContent: string) => Promise<boolean>,
     ) {
         super(app);
+        this.diff = createManualMergeDiff(serverContent, localContent);
+        this.resetHunkSelections("LOCAL");
     }
 
     public onOpen(): void {
@@ -1729,7 +1738,7 @@ class ManualMergeModal extends Modal {
         });
         this.contentEl.createEl("p", {
             cls: "vaultdatum-merge-introduction",
-            text: "Compare both versions and prepare the result to save. The Server version remains authoritative until the new change is accepted.",
+            text: "Choose the Server or this device for each change, then review the result to save. The Server remains authoritative until the new change is accepted.",
         });
         this.createTabs();
         this.createWorkspace();
@@ -1746,6 +1755,8 @@ class ManualMergeModal extends Modal {
         this.resultFeedback = undefined;
         this.saveButton = undefined;
         this.cancelButton = undefined;
+        this.hunkStatus.clear();
+        this.hunkViews.clear();
     }
 
     private activatePane(pane: MergePane): void {
@@ -1785,6 +1796,7 @@ class ManualMergeModal extends Modal {
                 "data-merge-pane": "RESULT",
                 id: "vaultdatum-merge-result",
                 role: "tabpanel",
+                "aria-labelledby": "vaultdatum-merge-tab-result",
             },
         });
         panel.createEl("h3", { text: "Merged result" });
@@ -1800,49 +1812,242 @@ class ManualMergeModal extends Modal {
                 spellcheck: "false",
             },
         });
-        this.result.value = this.localContent;
-        this.resultSelectionContent = this.result.value;
+        this.result.value = this.generatedResult;
         this.result.addEventListener("input", () => {
             this.updateResultFeedback();
         });
         this.updateResultFeedback();
     }
 
-    private createSourcePanel(
-        workspace: HTMLElement,
-        source: MergeSource,
-        content: string,
-    ): void {
-        const sourceName = mergeSourceName(source);
+    private createChangesPanel(workspace: HTMLElement): void {
         const panel = workspace.createDiv({
-            cls: "vaultdatum-merge-panel vaultdatum-merge-source",
+            cls: "vaultdatum-merge-panel vaultdatum-merge-changes",
             attr: {
-                "data-merge-pane": source,
-                id: `vaultdatum-merge-${source.toLowerCase()}`,
+                "data-merge-pane": "CHANGES",
+                id: "vaultdatum-merge-changes",
                 role: "tabpanel",
+                "aria-labelledby": "vaultdatum-merge-tab-changes",
             },
         });
-        panel.createEl("h3", { text: sourceName });
+        panel.createEl("h3", { text: "Line-by-line changes" });
         panel.createEl("p", {
             cls: "vaultdatum-merge-panel-description",
-            text: "Read-only source",
+            text: "Each change starts with this device's version. Choose a side for any change you want to replace.",
         });
-        const area = panel.createEl("textarea", {
-            cls: "vaultdatum-merge-editor",
+        const allActions = panel.createDiv({
+            cls: "vaultdatum-merge-all-actions",
+        });
+        this.createSourceSelectionButton(allActions, "SERVER");
+        this.createSourceSelectionButton(allActions, "LOCAL");
+
+        if (this.diff.limited) {
+            panel.createEl("p", {
+                cls: "vaultdatum-merge-diff-limit",
+                text: "This comparison is too large to split safely. Choose a complete version or edit the result directly.",
+            });
+            const change = manualMergeChangeBlocks(this.diff)[0];
+            if (change !== undefined) {
+                this.createLimitedChangeBlock(panel, change);
+            }
+            return;
+        }
+
+        const headings = panel.createDiv({
+            cls: "vaultdatum-merge-diff-headings",
+        });
+        headings.createDiv({ text: "Server version" });
+        headings.createDiv({ text: "This device's version" });
+
+        let changeNumber = 0;
+        for (const block of this.diff.blocks) {
+            if (block.kind === "EQUAL") {
+                this.createEqualBlock(
+                    panel,
+                    block.server.lines,
+                    block.local.lines,
+                );
+                continue;
+            }
+            this.createChangeBlock(panel, block, ++changeNumber);
+        }
+        if (changeNumber === 0) {
+            panel.createEl("p", {
+                cls: "vaultdatum-merge-no-changes",
+                text: "No line differences were found. You can still edit the merged result.",
+            });
+        }
+    }
+
+    private createChangeBlock(
+        panel: HTMLElement,
+        block: ManualMergeChangeBlock,
+        changeNumber: number,
+    ): void {
+        const hunk = panel.createDiv({
+            cls: "vaultdatum-merge-hunk",
+            attr: { "data-selected-source": this.selectedSource(block.id) },
+        });
+        const header = hunk.createDiv({
+            cls: "vaultdatum-merge-hunk-header",
+        });
+        header.createSpan({ text: `Change ${changeNumber}` });
+        const status = header.createSpan({
+            cls: "vaultdatum-merge-hunk-status",
+        });
+        this.hunkStatus.set(block.id, status);
+        this.hunkViews.set(block.id, hunk);
+        this.updateHunkStatus(block.id);
+        this.createDiffRows(
+            hunk,
+            block.server.lines,
+            block.local.lines,
+            "CHANGE",
+        );
+
+        const actions = hunk.createDiv({
+            cls: "vaultdatum-merge-hunk-actions",
+        });
+        this.createHunkSelectionButton(actions, block.id, "SERVER");
+        this.createHunkSelectionButton(actions, block.id, "LOCAL");
+    }
+
+    private createLimitedChangeBlock(
+        panel: HTMLElement,
+        block: ManualMergeChangeBlock,
+    ): void {
+        const hunk = panel.createDiv({
+            cls: "vaultdatum-merge-hunk",
+            attr: { "data-selected-source": this.selectedSource(block.id) },
+        });
+        const header = hunk.createDiv({
+            cls: "vaultdatum-merge-hunk-header",
+        });
+        header.createSpan({ text: "Complete document" });
+        const status = header.createSpan({
+            cls: "vaultdatum-merge-hunk-status",
+        });
+        this.hunkStatus.set(block.id, status);
+        this.hunkViews.set(block.id, hunk);
+        this.updateHunkStatus(block.id);
+
+        const previews = hunk.createDiv({
+            cls: "vaultdatum-merge-source-previews",
+        });
+        this.createSourcePreview(previews, "SERVER", block.server.content);
+        this.createSourcePreview(previews, "LOCAL", block.local.content);
+
+        const actions = hunk.createDiv({
+            cls: "vaultdatum-merge-hunk-actions",
+        });
+        this.createHunkSelectionButton(actions, block.id, "SERVER");
+        this.createHunkSelectionButton(actions, block.id, "LOCAL");
+    }
+
+    private createSourcePreview(
+        previews: HTMLElement,
+        source: ManualMergeSource,
+        content: string,
+    ): void {
+        const preview = previews.createDiv({
+            cls: `vaultdatum-merge-source-preview vaultdatum-merge-preview-${source.toLowerCase()}`,
+        });
+        preview.createDiv({ text: `${mergeSourceActionName(source)} version` });
+        const area = preview.createEl("textarea", {
             attr: {
-                "aria-label": sourceName,
-                rows: "14",
+                "aria-label": `${mergeSourceActionName(source)} version`,
+                rows: "12",
                 readonly: "true",
                 spellcheck: "false",
             },
         });
         area.value = content;
-        const useSource = panel.createEl("button", {
-            text: `Use ${mergeSourceActionName(source)} as result`,
+    }
+
+    private createDiffRows(
+        container: HTMLElement,
+        serverLines: readonly ManualMergeLine[],
+        localLines: readonly ManualMergeLine[],
+        kind: "CHANGE" | "EQUAL",
+    ): void {
+        const rows = container.createDiv({
+            cls: `vaultdatum-merge-diff-rows vaultdatum-merge-diff-${kind.toLowerCase()}`,
+        });
+        this.createDiffColumn(rows, serverLines, "SERVER", kind);
+        this.createDiffColumn(rows, localLines, "LOCAL", kind);
+    }
+
+    private createDiffColumn(
+        container: HTMLElement,
+        lines: readonly ManualMergeLine[],
+        source: ManualMergeSource,
+        kind: "CHANGE" | "EQUAL",
+    ): void {
+        const column = container.createDiv({
+            cls: `vaultdatum-merge-diff-column vaultdatum-merge-diff-${source.toLowerCase()}`,
+        });
+        if (lines.length === 0) {
+            column.createDiv({
+                cls: "vaultdatum-merge-diff-empty",
+                text: "No corresponding line",
+            });
+            return;
+        }
+
+        const marker = kind === "EQUAL" ? " " : source === "SERVER" ? "−" : "+";
+        for (const line of lines) {
+            const row = column.createDiv({ cls: "vaultdatum-merge-diff-line" });
+            row.createSpan({
+                cls: "vaultdatum-merge-diff-line-number",
+                text: String(line.number),
+            });
+            row.createSpan({
+                cls: "vaultdatum-merge-diff-marker",
+                text: marker,
+            });
+            row.createSpan({
+                cls: "vaultdatum-merge-diff-line-content",
+                text: line.text.length === 0 ? " " : line.text,
+            });
+        }
+    }
+
+    private createEqualBlock(
+        panel: HTMLElement,
+        serverLines: readonly ManualMergeLine[],
+        localLines: readonly ManualMergeLine[],
+    ): void {
+        const context = panel.createDiv({
+            cls: "vaultdatum-merge-context",
+        });
+        this.createDiffRows(context, serverLines, localLines, "EQUAL");
+    }
+
+    private createHunkSelectionButton(
+        actions: HTMLElement,
+        hunkId: string,
+        source: ManualMergeSource,
+    ): void {
+        const sourceName = mergeSourceActionName(source);
+        const button = actions.createEl("button", {
+            text: `Use ${sourceName}`,
             attr: { type: "button" },
         });
-        useSource.addEventListener("click", () => {
-            this.requestResultReplacement(source);
+        button.addEventListener("click", () => {
+            this.requestHunkSelection(hunkId, source);
+        });
+    }
+
+    private createSourceSelectionButton(
+        actions: HTMLElement,
+        source: ManualMergeSource,
+    ): void {
+        const sourceName = mergeSourceActionName(source);
+        const button = actions.createEl("button", {
+            text: `Use all from ${sourceName}`,
+            attr: { type: "button" },
+        });
+        button.addEventListener("click", () => {
+            this.requestSourceSelection(source);
         });
     }
 
@@ -1856,6 +2061,7 @@ class ManualMergeModal extends Modal {
                 text: mergePaneName(pane),
                 attr: {
                     type: "button",
+                    id: `vaultdatum-merge-tab-${pane.toLowerCase()}`,
                     role: "tab",
                     "aria-controls": `vaultdatum-merge-${pane.toLowerCase()}`,
                 },
@@ -1872,8 +2078,7 @@ class ManualMergeModal extends Modal {
         this.workspace = this.contentEl.createDiv({
             cls: "vaultdatum-merge-workspace",
         });
-        this.createSourcePanel(this.workspace, "SERVER", this.serverContent);
-        this.createSourcePanel(this.workspace, "LOCAL", this.localContent);
+        this.createChangesPanel(this.workspace);
         this.createResultPanel(this.workspace);
     }
 
@@ -1894,39 +2099,105 @@ class ManualMergeModal extends Modal {
         this.tabButtons.get(nextPane)?.focus();
     }
 
-    private hasUnsavedResultEdits(): boolean {
-        return this.result?.value !== this.resultSelectionContent;
+    private hasCustomResult(): boolean {
+        return this.result?.value !== this.generatedResult;
     }
 
-    private requestResultReplacement(source: MergeSource): void {
+    private requestHunkSelection(
+        hunkId: string,
+        source: ManualMergeSource,
+    ): void {
         if (this.saving) {
             return;
         }
-        if (!this.hasUnsavedResultEdits()) {
-            this.selectResultSource(source);
+        const sourceName = mergeSourceActionName(source);
+        this.requestGeneratedResultReplacement(
+            `Use ${sourceName} for this change? Your unsaved result text will be replaced by a result rebuilt from the selected changes.`,
+            `Use ${sourceName}`,
+            () => {
+                this.hunkSelections.set(hunkId, source);
+                this.replaceResultWithSelections();
+            },
+        );
+    }
+
+    private requestSourceSelection(source: ManualMergeSource): void {
+        if (this.saving) {
+            return;
+        }
+        const sourceName = mergeSourceActionName(source);
+        this.requestGeneratedResultReplacement(
+            `Use all content from ${sourceName} as the result? Your unsaved result text will be replaced by that version.`,
+            `Use all from ${sourceName}`,
+            () => {
+                this.resetHunkSelections(source);
+                this.replaceResultWithSelections(true);
+            },
+        );
+    }
+
+    private requestGeneratedResultReplacement(
+        description: string,
+        confirmLabel: string,
+        replace: () => void,
+    ): void {
+        if (!this.hasCustomResult()) {
+            replace();
             return;
         }
 
         new ReplaceManualMergeResultModal(
             this.app,
-            mergeSourceActionName(source),
-            () => this.selectResultSource(source),
+            description,
+            confirmLabel,
+            replace,
         ).open();
     }
 
-    private selectResultSource(source: MergeSource): void {
+    private replaceResultWithSelections(focusResult = false): void {
         const result = this.result;
         if (result === undefined) {
             return;
         }
 
-        result.value =
-            source === "SERVER" ? this.serverContent : this.localContent;
-        this.resultSelection = source;
-        this.resultSelectionContent = result.value;
+        this.generatedResult = composeManualMergeResult(
+            this.diff,
+            this.hunkSelections,
+        );
+        result.value = this.generatedResult;
+        for (const change of manualMergeChangeBlocks(this.diff)) {
+            this.updateHunkStatus(change.id);
+        }
         this.updateResultFeedback();
-        this.activatePane("RESULT");
-        result.focus();
+        if (focusResult) {
+            this.activatePane("RESULT");
+            result.focus();
+        }
+    }
+
+    private resetHunkSelections(source: ManualMergeSource): void {
+        this.hunkSelections.clear();
+        for (const change of manualMergeChangeBlocks(this.diff)) {
+            this.hunkSelections.set(change.id, source);
+        }
+        this.generatedResult = composeManualMergeResult(
+            this.diff,
+            this.hunkSelections,
+        );
+    }
+
+    private selectedSource(hunkId: string): ManualMergeSource {
+        return this.hunkSelections.get(hunkId) ?? "LOCAL";
+    }
+
+    private updateHunkStatus(hunkId: string): void {
+        const source = this.selectedSource(hunkId);
+        this.hunkStatus
+            .get(hunkId)
+            ?.setText(`Using ${mergeSourceActionName(source)}`);
+        this.hunkViews
+            .get(hunkId)
+            ?.setAttribute("data-selected-source", source);
     }
 
     private async saveResult(): Promise<void> {
@@ -1958,16 +2229,26 @@ class ManualMergeModal extends Modal {
         if (this.saving) {
             return;
         }
-        if (this.hasUnsavedResultEdits()) {
+        if (this.hasCustomResult()) {
             this.resultFeedback?.setText(
-                "Custom result with unsaved edits. Choosing a source will replace this result.",
+                "Custom result with unsaved edits. Choosing a change will rebuild this result.",
+            );
+            return;
+        }
+        const changes = manualMergeChangeBlocks(this.diff);
+        const serverChoiceCount = changes.filter(
+            (change) => this.selectedSource(change.id) === "SERVER",
+        ).length;
+        if (serverChoiceCount === 0) {
+            this.resultFeedback?.setText(
+                "Result starts with this device's version.",
             );
             return;
         }
         this.resultFeedback?.setText(
-            this.resultSelection === "LOCAL"
-                ? "Result starts with this device's version."
-                : "Result uses the Server version.",
+            serverChoiceCount === changes.length
+                ? "Result uses the Server version."
+                : "Result combines selected Server and this device changes.",
         );
     }
 
@@ -1985,7 +2266,8 @@ class ReplaceManualMergeResultModal extends Modal {
 
     public constructor(
         app: App,
-        private readonly sourceName: string,
+        private readonly description: string,
+        private readonly confirmLabel: string,
         private readonly replace: () => void,
     ) {
         super(app);
@@ -1994,7 +2276,7 @@ class ReplaceManualMergeResultModal extends Modal {
     public onOpen(): void {
         this.setTitle("Replace merged result?");
         this.contentEl.createEl("p", {
-            text: `Use ${this.sourceName} as the new result? Your unsaved result text will be replaced.`,
+            text: this.description,
         });
         this.contentEl.createEl("p", {
             text: "Neither the Server version nor this device's version will be changed.",
@@ -2007,7 +2289,7 @@ class ReplaceManualMergeResultModal extends Modal {
             )
             .addButton((button) =>
                 button
-                    .setButtonText(`Use ${this.sourceName}`)
+                    .setButtonText(this.confirmLabel)
                     .setWarning()
                     .onClick(() => {
                         if (this.confirmed) {

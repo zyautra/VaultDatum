@@ -1,6 +1,6 @@
 .modal.vaultdatum-merge-modal {
-    width: min(960px, calc(100vw - 32px));
-    max-width: 960px;
+    width: min(1080px, calc(100vw - 32px));
+    max-width: 1080px;
 }
 
 .vaultdatum-merge-content {
@@ -23,13 +23,10 @@
 
 .vaultdatum-merge-workspace {
     display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: var(--size-4-3);
 }
 
 .vaultdatum-merge-panel {
-    display: flex;
-    flex-direction: column;
     min-width: 0;
     padding: var(--size-4-3);
     border: 1px solid var(--background-modifier-border);
@@ -51,8 +48,157 @@
     font-size: var(--font-ui-small);
 }
 
+.vaultdatum-merge-all-actions,
+.vaultdatum-merge-hunk-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--size-4-2);
+}
+
+.vaultdatum-merge-all-actions {
+    margin: var(--size-4-2) 0 var(--size-4-3);
+}
+
+.vaultdatum-merge-diff-limit {
+    margin: 0 0 var(--size-4-3);
+    color: var(--text-warning);
+}
+
+.vaultdatum-merge-diff-headings,
+.vaultdatum-merge-diff-rows {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: var(--size-4-2);
+}
+
+.vaultdatum-merge-diff-headings {
+    padding: var(--size-4-1) var(--size-4-2);
+    color: var(--text-muted);
+    font-size: var(--font-ui-small);
+    font-weight: var(--font-semibold);
+}
+
+.vaultdatum-merge-source-previews {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: var(--size-4-2);
+    padding: var(--size-4-2);
+}
+
+.vaultdatum-merge-source-preview {
+    min-width: 0;
+    color: var(--text-muted);
+    font-size: var(--font-ui-small);
+}
+
+.vaultdatum-merge-source-preview textarea {
+    box-sizing: border-box;
+    width: 100%;
+    margin-top: var(--size-2-2);
+    resize: vertical;
+    font-family: var(--font-monospace);
+    line-height: 1.5;
+}
+
+.vaultdatum-merge-hunk,
+.vaultdatum-merge-context {
+    margin-top: var(--size-4-2);
+    overflow: hidden;
+    border: 1px solid var(--background-modifier-border);
+    border-radius: var(--radius-s);
+}
+
+.vaultdatum-merge-hunk {
+    border-left-width: 3px;
+}
+
+.vaultdatum-merge-hunk[data-selected-source="SERVER"] {
+    border-left-color: var(--color-red);
+}
+
+.vaultdatum-merge-hunk[data-selected-source="LOCAL"] {
+    border-left-color: var(--color-green);
+}
+
+.vaultdatum-merge-hunk-header {
+    display: flex;
+    justify-content: space-between;
+    gap: var(--size-4-2);
+    padding: var(--size-4-1) var(--size-4-2);
+    background: var(--background-primary-alt);
+    font-size: var(--font-ui-small);
+    font-weight: var(--font-semibold);
+}
+
+.vaultdatum-merge-hunk-status {
+    color: var(--text-muted);
+    font-weight: var(--font-normal);
+}
+
+.vaultdatum-merge-diff-column {
+    min-width: 0;
+    background: var(--background-primary);
+}
+
+.vaultdatum-merge-diff-change .vaultdatum-merge-diff-server {
+    background: var(--background-modifier-error);
+}
+
+.vaultdatum-merge-diff-change .vaultdatum-merge-diff-local {
+    background: var(--background-modifier-success);
+}
+
+.vaultdatum-merge-diff-line {
+    display: grid;
+    grid-template-columns: 3.5ch 1.25em minmax(0, 1fr);
+    min-height: 1.6em;
+    font-family: var(--font-monospace);
+    font-size: var(--font-ui-smaller);
+    line-height: 1.6;
+}
+
+.vaultdatum-merge-diff-line-number,
+.vaultdatum-merge-diff-marker {
+    color: var(--text-faint);
+    user-select: none;
+}
+
+.vaultdatum-merge-diff-line-number {
+    padding-left: var(--size-4-1);
+    text-align: right;
+}
+
+.vaultdatum-merge-diff-marker {
+    padding-left: var(--size-2-2);
+}
+
+.vaultdatum-merge-diff-line-content {
+    min-width: 0;
+    padding-right: var(--size-4-2);
+    overflow-x: auto;
+    white-space: pre;
+}
+
+.vaultdatum-merge-diff-empty {
+    min-height: 1.6em;
+    padding: 0 var(--size-4-2);
+    color: var(--text-faint);
+    font-size: var(--font-ui-smaller);
+    font-style: italic;
+    line-height: 1.6;
+}
+
+.vaultdatum-merge-hunk-actions {
+    justify-content: flex-end;
+    padding: var(--size-4-2);
+    background: var(--background-primary-alt);
+}
+
+.vaultdatum-merge-context {
+    opacity: 0.76;
+}
+
 .vaultdatum-merge-result {
-    grid-column: 1 / -1;
     border-color: var(--interactive-accent);
     background: var(--background-primary);
 }
@@ -60,19 +206,11 @@
 .vaultdatum-merge-editor {
     box-sizing: border-box;
     width: 100%;
-    min-height: 18rem;
+    min-height: 22rem;
     margin-bottom: var(--size-4-2);
     resize: vertical;
     font-family: var(--font-monospace);
     line-height: 1.5;
-}
-
-.vaultdatum-merge-result .vaultdatum-merge-editor {
-    min-height: 22rem;
-}
-
-.vaultdatum-merge-source button {
-    align-self: flex-start;
 }
 
 .vaultdatum-merge-actions {
@@ -89,15 +227,13 @@
 
     .vaultdatum-merge-tabs {
         display: grid;
-        grid-template-columns: repeat(3, minmax(0, 1fr));
+        grid-template-columns: repeat(2, minmax(0, 1fr));
         gap: var(--size-2-2);
         margin-bottom: var(--size-4-3);
     }
 
     .vaultdatum-merge-tabs button {
         min-width: 0;
-        padding-right: var(--size-2-2);
-        padding-left: var(--size-2-2);
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
@@ -108,25 +244,57 @@
         background-color: var(--interactive-accent);
     }
 
-    .vaultdatum-merge-workspace {
-        display: block;
-    }
-
     .vaultdatum-merge-panel {
         display: none;
     }
 
-    .vaultdatum-merge-workspace[data-active-pane="SERVER"]
-        .vaultdatum-merge-panel[data-merge-pane="SERVER"],
-    .vaultdatum-merge-workspace[data-active-pane="LOCAL"]
-        .vaultdatum-merge-panel[data-merge-pane="LOCAL"],
+    .vaultdatum-merge-workspace[data-active-pane="CHANGES"]
+        .vaultdatum-merge-panel[data-merge-pane="CHANGES"],
     .vaultdatum-merge-workspace[data-active-pane="RESULT"]
         .vaultdatum-merge-panel[data-merge-pane="RESULT"] {
-        display: flex;
+        display: block;
     }
 
-    .vaultdatum-merge-editor,
-    .vaultdatum-merge-result .vaultdatum-merge-editor {
+    .vaultdatum-merge-diff-headings {
+        display: none;
+    }
+
+    .vaultdatum-merge-diff-rows {
+        grid-template-columns: minmax(0, 1fr);
+        gap: var(--size-2-2);
+    }
+
+    .vaultdatum-merge-source-previews {
+        grid-template-columns: minmax(0, 1fr);
+    }
+
+    .vaultdatum-merge-diff-column::before {
+        display: block;
+        padding: var(--size-2-2) var(--size-4-2);
+        color: var(--text-muted);
+        background: var(--background-primary-alt);
+        font-size: var(--font-ui-small);
+        font-weight: var(--font-semibold);
+    }
+
+    .vaultdatum-merge-diff-server::before {
+        content: "Server version";
+    }
+
+    .vaultdatum-merge-diff-local::before {
+        content: "This device's version";
+    }
+
+    .vaultdatum-merge-hunk-actions {
+        justify-content: stretch;
+    }
+
+    .vaultdatum-merge-hunk-actions button,
+    .vaultdatum-merge-all-actions button {
+        flex: 1 1 0;
+    }
+
+    .vaultdatum-merge-editor {
         min-height: min(48vh, 28rem);
     }
 
