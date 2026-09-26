@@ -187,14 +187,23 @@ up this volume before an upgrade; do not use `docker compose down -v` in
 production. For Docker, Kubernetes, or another OCI platform, mount persistent
 storage at `/data`.
 
+The Compose image has a non-root fallback identity, but a host-backed bind
+mount should use a dedicated Host `vaultdatum` service account instead. Set
+`VAULTDATUM_RUNTIME_UID` and `VAULTDATUM_RUNTIME_GID` to that account's numeric
+identity through an ignored `.env` file; [`.env.example`](./.env.example) lists
+the optional variables. Provision the mount owner before startup. Do not use a
+personal login account, and do not rely on the fallback UID matching a Host
+user.
+
 ## Deploy on Kubernetes
 
 `deploy/kubernetes/base` is portable: it makes no assumptions about a
 namespace, node, storage path, container registry, service exposure, or private
 network ranges. It deploys one `Recreate` replica, a `ReadWriteOnce` 20 Gi PVC,
 and a `ClusterIP` Service. A cluster with a default dynamic StorageClass can
-provision the PVC directly. For static storage, supply a cluster-specific PV and
-PVC binding in a private overlay.
+provision the PVC directly. Every host-backed or permission-sensitive volume
+also needs a private runtime-identity overlay. For static storage, supply the
+cluster-specific PV, PVC binding, and runtime identity there.
 
 Build and publish the native OCI image to the registry selected for the target
 cluster:
@@ -207,8 +216,8 @@ cluster:
   -Dquarkus.package.jar.enabled=false \
   --no-daemon
 docker build -f server/src/main/docker/Dockerfile.native \
-  -t registry.example.com/vaultdatum/server:0.3.1 server
-docker push registry.example.com/vaultdatum/server:0.3.1
+  -t registry.example.com/vaultdatum/server:0.3.2 server
+docker push registry.example.com/vaultdatum/server:0.3.2
 ```
 
 Create an organization-specific overlay outside source control (or use a
@@ -228,8 +237,15 @@ resources:
 images:
   - name: vaultdatum-server
     newName: registry.example.com/vaultdatum/server
-    newTag: "0.3.1"
+    newTag: "0.3.2"
 ```
+
+The public base intentionally does not set a fixed runtime UID/GID. In a
+host-backed deployment, use the dedicated Host service account's numeric
+identity in the private overlay and provision `/data` with the same owner. See
+[the Kubernetes deployment guide](./deploy/kubernetes/README.md). A local
+`internal-local` overlay is ignored by Git because node names, storage paths,
+private network ranges, and runtime identity are installation configuration.
 
 Apply the overlay and wait for the one authoritative server Pod:
 

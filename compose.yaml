@@ -6,7 +6,11 @@ services:
     command:
       - sh
       - -ec
-      - mkdir -p /data/state/.sqlite-tmp && chown -R 1001:0 /data
+      - >-
+        mkdir -p /data/state/.sqlite-tmp
+        && chown "${VAULTDATUM_RUNTIME_UID:-1001}:${VAULTDATUM_RUNTIME_GID:-0}"
+        /data /data/state /data/state/.sqlite-tmp
+        && chmod 0700 /data /data/state /data/state/.sqlite-tmp
     volumes:
       - vaultdatum-data:/data
 
@@ -15,6 +19,7 @@ services:
       context: ./server
       dockerfile: src/main/docker/Dockerfile.native
     image: vaultdatum-server:local
+    user: "${VAULTDATUM_RUNTIME_UID:-1001}:${VAULTDATUM_RUNTIME_GID:-0}"
     depends_on:
       initialize-data:
         condition: service_completed_successfully
