@@ -1,6 +1,6 @@
 {
   "name": "vaultdatum-obsidian",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "description": "VaultDatum synchronization client for Obsidian",
   "type": "module",
@@ -13,7 +13,8 @@
     "lint": "eslint src tests",
     "protocol:check": "npm run protocol:generate && git diff --exit-code -- src/transport/generated/protocol.ts",
     "protocol:generate": "npm --prefix ../../protocol run generate && prettier --write src/transport/generated/protocol.ts",
-    "test": "npm run check && npm run test:remote-apply && npm run test:notifications && npm run test:sync-scheduler",
+    "test": "npm run check && npm run test:client-store && npm run test:remote-apply && npm run test:notifications && npm run test:sync-scheduler",
+    "test:client-store": "esbuild tests/client-store.test.ts --bundle --platform=node --format=esm --target=node24 --outfile=build/client-store.test.mjs && node build/client-store.test.mjs",
     "test:remote-apply": "esbuild tests/remote-apply.test.ts --bundle --platform=node --format=esm --target=node24 --outfile=build/remote-apply.test.mjs && node build/remote-apply.test.mjs",
     "test:notifications": "esbuild tests/notification-channel.test.ts --bundle --platform=node --format=esm --target=node24 --outfile=build/notification-channel.test.mjs && node build/notification-channel.test.mjs",
     "test:sync-scheduler": "esbuild tests/sync-scheduler.test.ts --bundle --platform=node --format=esm --target=node24 --outfile=build/sync-scheduler.test.mjs && node build/sync-scheduler.test.mjs"

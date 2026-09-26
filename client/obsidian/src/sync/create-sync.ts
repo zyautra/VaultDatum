@@ -37,7 +37,17 @@ export interface SyncSummary {
     readonly oversized: number;
     readonly offline: boolean;
     readonly vaultMismatch: boolean;
+    readonly initialBootstrap?: boolean;
 }
+
+export type SyncProgressPhase =
+    | "CHECKING_SERVER_VAULT"
+    | "CLASSIFYING_LOCAL_FILES"
+    | "CHECKING_SERVER_CHANGES"
+    | "SENDING_LOCAL_CHANGES"
+    | "VERIFYING_RESULTS";
+
+export type SyncProgressReporter = (phase: SyncProgressPhase) => void;
 
 interface PullSummary {
     readonly conflicted: number;
@@ -285,17 +295,25 @@ export class CreateSync {
         return pending;
     }
 
-    public sync(): Promise<SyncSummary> {
-        return this.startSync(false);
+    public sync(progress?: SyncProgressReporter): Promise<SyncSummary> {
+        return this.startSync(false, progress);
     }
 
-    public fullReconcile(): Promise<SyncSummary> {
-        return this.startSync(true);
+    public fullReconcile(
+        progress?: SyncProgressReporter,
+    ): Promise<SyncSummary> {
+        return this.startSync(true, progress);
     }
 
-    private startSync(fullReconciliation: boolean): Promise<SyncSummary> {
+    private startSync(
+        fullReconciliation: boolean,
+        progress: SyncProgressReporter | undefined,
+    ): Promise<SyncSummary> {
         if (this.activeSync === undefined) {
-            this.activeSync = this.runSync(fullReconciliation).finally(() => {
+            this.activeSync = this.runSync(
+                fullReconciliation,
+                progress,
+            ).finally(() => {
                 this.activeSync = undefined;
             });
         }
@@ -452,7 +470,10 @@ export class CreateSync {
         return pending;
     }
 
-    private async runSync(fullReconciliation: boolean): Promise<SyncSummary> {
+    private async runSync(
+        fullReconciliation: boolean,
+        progress: SyncProgressReporter | undefined,
+    ): Promise<SyncSummary> {
         const serverUrl = this.serverUrl();
         let oversized = 0;
 
@@ -461,6 +482,7 @@ export class CreateSync {
         }
 
         try {
+            progress?.("VERIFYING_RESULTS");
             await this.remoteApply.recoverInterruptedApplies();
             const bootstrapRequired =
                 !(await this.store.isInitialBootstrapComplete());
@@ -471,6 +493,7 @@ export class CreateSync {
             let beforePush: PullSummary;
 
             if (bootstrapRequired) {
+                progress?.("CLASSIFYING_LOCAL_FILES");
                 const preManifest = await this.reconcileLocalVault(false);
                 oversized = preManifest.oversized;
                 let preManifestConflicted = preManifest.conflicted;
@@ -479,6 +502,7 @@ export class CreateSync {
                     !fullReconciliation &&
                     (await this.store.hasStoredOperations())
                 ) {
+                    progress?.("CHECKING_SERVER_VAULT");
                     const recovered = await this.pull(serverUrl);
                     preManifestConflicted += recovered.conflicted;
                     if (recovered.unavailable) {
@@ -486,6 +510,7 @@ export class CreateSync {
                     }
                 }
 
+                progress?.("CHECKING_SERVER_VAULT");
                 beforePush = await this.reconcileServerManifest(serverUrl);
                 if (beforePush.unavailable) {
                     return unavailable(
@@ -495,6 +520,7 @@ export class CreateSync {
                     );
                 }
 
+                progress?.("CLASSIFYING_LOCAL_FILES");
                 local = await this.reconcileLocalVault(true);
                 oversized = local.oversized;
                 local = {
@@ -503,8 +529,10 @@ export class CreateSync {
                 };
                 await this.store.completeInitialBootstrap();
             } else {
+                progress?.("CLASSIFYING_LOCAL_FILES");
                 local = await this.reconcileLocalVault(false);
                 oversized = local.oversized;
+                progress?.("CHECKING_SERVER_CHANGES");
                 beforePush = fullReconciliation
                     ? await this.reconcileServerManifest(serverUrl)
                     : await this.pull(serverUrl);
@@ -516,6 +544,7 @@ export class CreateSync {
                 return unavailable(0, beforePushConflicted, oversized);
             }
             if (beforePush.historyUnavailable) {
+                progress?.("CHECKING_SERVER_CHANGES");
                 const reconciled =
                     await this.reconcileServerManifest(serverUrl);
                 beforePushConflicted += reconciled.conflicted;
@@ -532,6 +561,7 @@ export class CreateSync {
             await this.remoteApply.recoverKeepBothResolutions(serverUrl);
             await this.remoteApply.recoverManualMergeResolutions();
 
+            progress?.("SENDING_LOCAL_CHANGES");
             const pushed = await this.push(serverUrl);
             if (pushed.offline) {
                 return unavailable(
@@ -541,6 +571,7 @@ export class CreateSync {
                 );
             }
 
+            progress?.("VERIFYING_RESULTS");
             let afterPush = await this.pull(serverUrl);
             let afterPushConflicted = afterPush.conflicted;
             if (afterPush.unavailable) {
@@ -553,6 +584,7 @@ export class CreateSync {
                 );
             }
             if (afterPush.historyUnavailable) {
+                progress?.("VERIFYING_RESULTS");
                 const reconciled =
                     await this.reconcileServerManifest(serverUrl);
                 afterPushConflicted += reconciled.conflicted;
@@ -587,6 +619,7 @@ export class CreateSync {
                 oversized,
                 offline: false,
                 vaultMismatch: false,
+                ...(bootstrapRequired ? { initialBootstrap: true } : {}),
             };
         } catch (error: unknown) {
             if (error instanceof VaultMismatchError) {

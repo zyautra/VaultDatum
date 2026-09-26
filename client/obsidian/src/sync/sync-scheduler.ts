@@ -1,31 +1,44 @@
-import type { SyncSummary } from "./create-sync";
+import type { SyncProgressPhase, SyncSummary } from "./create-sync";
 
 export type SyncMode = "INCREMENTAL" | "FULL";
 
 export type SyncStatusKind =
     | "IDLE"
+    | "SETUP_REQUIRED"
+    | "FIRST_SYNC"
     | "SYNCING"
     | "UP_TO_DATE"
     | "PENDING"
     | "OFFLINE"
     | "CONFLICT"
-    | "ERROR";
+    | "ERROR"
+    | "PAUSED";
 
 export interface SyncStatus {
     readonly kind: SyncStatusKind;
+    readonly phase?: SyncProgressPhase;
     readonly lastSuccessfulAt?: string;
     readonly summary?: SyncSummary;
+    readonly activity?: SyncActivity;
 }
 
 export interface SyncActivity {
     readonly hasPending: boolean;
     readonly hasConflicts: boolean;
+    readonly pendingCount?: number;
+    readonly conflictCount?: number;
+    readonly initialBootstrapComplete?: boolean;
 }
 
 export interface SyncSchedulerOptions {
-    readonly run: (mode: SyncMode) => Promise<SyncSummary>;
+    readonly run: (
+        mode: SyncMode,
+        reportProgress: (phase: SyncProgressPhase) => void,
+    ) => Promise<SyncSummary>;
     readonly readActivity: () => Promise<SyncActivity>;
     readonly isConfigured: () => boolean;
+    readonly isEnabled?: () => boolean;
+    readonly initialLastSuccessfulAt?: string;
     readonly onStatus?: (status: SyncStatus) => void;
     readonly retryDelaysMs?: readonly number[];
 }
@@ -37,6 +50,18 @@ interface Waiter {
 }
 
 const DEFAULT_RETRY_DELAYS_MS = [1_000, 5_000, 30_000, 60_000] as const;
+
+export class SyncNotConfiguredError extends Error {
+    public constructor() {
+        super("VaultDatum server URL is not configured");
+    }
+}
+
+export class SyncPausedError extends Error {
+    public constructor() {
+        super("VaultDatum synchronization is paused");
+    }
+}
 
 export class SyncScheduler {
     private disposed = false;
@@ -64,7 +89,13 @@ export class SyncScheduler {
             options.retryDelaysMs?.filter(
                 (delay) => Number.isSafeInteger(delay) && delay > 0,
             ) ?? DEFAULT_RETRY_DELAYS_MS;
-        this.publish({ kind: "IDLE" });
+        this.lastSuccessfulAt = validTimestamp(options.initialLastSuccessfulAt)
+            ? options.initialLastSuccessfulAt
+            : undefined;
+        this.publish({
+            kind: this.currentAvailabilityStatus(),
+            lastSuccessfulAt: this.lastSuccessfulAt,
+        });
     }
 
     public schedule(mode: SyncMode = "INCREMENTAL"): void {
@@ -76,6 +107,23 @@ export class SyncScheduler {
             return Promise.reject(
                 new Error("VaultDatum sync scheduler is stopped"),
             );
+        }
+
+        if (!this.isEnabled()) {
+            this.cancelRetry();
+            this.publish({
+                kind: "PAUSED",
+                lastSuccessfulAt: this.lastSuccessfulAt,
+            });
+            return Promise.reject(new SyncPausedError());
+        }
+        if (!this.options.isConfigured()) {
+            this.cancelRetry();
+            this.publish({
+                kind: "SETUP_REQUIRED",
+                lastSuccessfulAt: this.lastSuccessfulAt,
+            });
+            return Promise.reject(new SyncNotConfiguredError());
         }
 
         this.cancelRetry();
@@ -104,6 +152,21 @@ export class SyncScheduler {
         );
     }
 
+    public refreshAvailability(): void {
+        if (this.disposed || this.running || this.scheduled) {
+            return;
+        }
+
+        this.publish({
+            kind: this.currentAvailabilityStatus(),
+            lastSuccessfulAt: this.lastSuccessfulAt,
+        });
+    }
+
+    public isBusy(): boolean {
+        return this.running || this.scheduled;
+    }
+
     private start(): void {
         if (this.running || this.disposed) {
             return;
@@ -122,17 +185,23 @@ export class SyncScheduler {
                     ? "FULL"
                     : "INCREMENTAL";
                 this.fullScheduled = false;
-                this.publish({
-                    kind: "SYNCING",
-                    lastSuccessfulAt: this.lastSuccessfulAt,
-                });
+                const runningStatus = await this.publishRunningStatus();
 
                 try {
-                    const summary = await this.options.run(mode);
+                    const summary = await this.options.run(mode, (phase) => {
+                        this.publish({
+                            ...runningStatus,
+                            phase,
+                        });
+                    });
                     if (this.disposed) {
                         return;
                     }
-                    await this.publishSummary(summary);
+                    if (!this.isEnabled()) {
+                        await this.publishPausedSummary(summary);
+                    } else {
+                        await this.publishSummary(summary);
+                    }
                     this.resolveThrough(generation, summary);
                 } catch (error: unknown) {
                     this.publish({
@@ -179,6 +248,7 @@ export class SyncScheduler {
                 kind: statusKind(summary, activity),
                 lastSuccessfulAt: this.lastSuccessfulAt,
                 summary,
+                activity,
             });
         } catch (error: unknown) {
             console.warn(
@@ -193,9 +263,33 @@ export class SyncScheduler {
         }
     }
 
+    private async publishPausedSummary(summary: SyncSummary): Promise<void> {
+        if (!summary.offline && !summary.vaultMismatch) {
+            this.retryAttempt = 0;
+            this.lastSuccessfulAt = new Date().toISOString();
+        }
+
+        let activity: SyncActivity | undefined;
+        try {
+            activity = await this.options.readActivity();
+        } catch (error: unknown) {
+            console.warn(
+                "VaultDatum could not read synchronization status",
+                error,
+            );
+        }
+        this.publish({
+            kind: "PAUSED",
+            lastSuccessfulAt: this.lastSuccessfulAt,
+            summary,
+            activity,
+        });
+    }
+
     private scheduleRetry(): void {
         if (
             this.disposed ||
+            !this.isEnabled() ||
             !this.options.isConfigured() ||
             this.retryTimer !== undefined ||
             this.retryDelaysMs.length === 0
@@ -238,6 +332,40 @@ export class SyncScheduler {
         }
     }
 
+    private async publishRunningStatus(): Promise<SyncStatus> {
+        let activity: SyncActivity | undefined;
+        try {
+            activity = await this.options.readActivity();
+        } catch (error: unknown) {
+            console.warn(
+                "VaultDatum could not read synchronization status",
+                error,
+            );
+        }
+
+        const status: SyncStatus = {
+            kind:
+                activity?.initialBootstrapComplete === false
+                    ? "FIRST_SYNC"
+                    : "SYNCING",
+            lastSuccessfulAt: this.lastSuccessfulAt,
+            activity,
+        };
+        this.publish(status);
+        return status;
+    }
+
+    private currentAvailabilityStatus(): SyncStatusKind {
+        if (!this.isEnabled()) {
+            return "PAUSED";
+        }
+        return this.options.isConfigured() ? "IDLE" : "SETUP_REQUIRED";
+    }
+
+    private isEnabled(): boolean {
+        return this.options.isEnabled?.() ?? true;
+    }
+
     private resolveThrough(generation: number, summary: SyncSummary): void {
         const retained: Waiter[] = [];
         for (const waiter of this.waiters) {
@@ -274,4 +402,8 @@ function statusKind(
         return "PENDING";
     }
     return "UP_TO_DATE";
+}
+
+function validTimestamp(value: string | undefined): value is string {
+    return value !== undefined && Number.isFinite(Date.parse(value));
 }

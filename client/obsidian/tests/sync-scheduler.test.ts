@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 
 import type { SyncSummary } from "../src/sync/create-sync";
 import {
+    SyncNotConfiguredError,
+    SyncPausedError,
     SyncScheduler,
     type SyncMode,
     type SyncStatus,
@@ -28,11 +30,12 @@ async function schedulesAFollowUpForATriggerDuringSync(): Promise<void> {
             hasPending: false,
             hasConflicts: false,
         }),
-        isConfigured: () => false,
+        isConfigured: () => true,
         onStatus: (status) => statuses.push(status),
     });
 
     scheduler.schedule();
+    await nextTurn();
     assert.equal(runs.length, 1);
     assert.equal(runs[0]?.mode, "INCREMENTAL");
 
@@ -68,11 +71,12 @@ async function runsAQueuedFullReconciliationAfterTheCurrentSync(): Promise<void>
             hasPending: false,
             hasConflicts: false,
         }),
-        isConfigured: () => false,
+        isConfigured: () => true,
     });
 
     const initial = scheduler.request();
     const full = scheduler.request("FULL");
+    await nextTurn();
     assert.equal(runs.length, 1);
     assert.equal(runs[0]?.mode, "INCREMENTAL");
 
@@ -87,7 +91,7 @@ async function runsAQueuedFullReconciliationAfterTheCurrentSync(): Promise<void>
     scheduler.dispose();
 }
 
-async function reportsOfflineWithoutRetryingAnUnconfiguredServer(): Promise<void> {
+async function reportsSetupRequiredWithoutRunningAnUnconfiguredServer(): Promise<void> {
     const statuses: SyncStatus[] = [];
     const scheduler = new SyncScheduler({
         run: async () => ({ ...successful, offline: true }),
@@ -99,9 +103,9 @@ async function reportsOfflineWithoutRetryingAnUnconfiguredServer(): Promise<void
         onStatus: (status) => statuses.push(status),
     });
 
-    await scheduler.request();
+    await assert.rejects(scheduler.request(), SyncNotConfiguredError);
 
-    assert.equal(statuses.at(-1)?.kind, "OFFLINE");
+    assert.equal(statuses.at(-1)?.kind, "SETUP_REQUIRED");
     scheduler.dispose();
 }
 
@@ -115,13 +119,133 @@ async function reportsAnUnexpectedRunFailure(): Promise<void> {
             hasPending: false,
             hasConflicts: false,
         }),
-        isConfigured: () => false,
+        isConfigured: () => true,
         onStatus: (status) => statuses.push(status),
     });
 
     await assert.rejects(scheduler.request(), /Unexpected transport failure/);
 
     assert.equal(statuses.at(-1)?.kind, "ERROR");
+    scheduler.dispose();
+}
+
+async function reportsPausedWithoutRunning(): Promise<void> {
+    const statuses: SyncStatus[] = [];
+    let runs = 0;
+    const scheduler = new SyncScheduler({
+        run: async () => {
+            runs += 1;
+            return successful;
+        },
+        readActivity: async () => ({
+            hasPending: false,
+            hasConflicts: false,
+        }),
+        isConfigured: () => true,
+        isEnabled: () => false,
+        onStatus: (status) => statuses.push(status),
+    });
+
+    await assert.rejects(scheduler.request(), SyncPausedError);
+
+    assert.equal(runs, 0);
+    assert.equal(statuses.at(-1)?.kind, "PAUSED");
+    scheduler.dispose();
+}
+
+async function reportsFirstSyncWhileBootstrapIsIncomplete(): Promise<void> {
+    const runs: DeferredRun[] = [];
+    const statuses: SyncStatus[] = [];
+    const scheduler = new SyncScheduler({
+        run: (mode) => {
+            const deferred = new DeferredRun(mode);
+            runs.push(deferred);
+            return deferred.promise;
+        },
+        readActivity: async () => ({
+            hasPending: false,
+            hasConflicts: false,
+            initialBootstrapComplete: false,
+        }),
+        isConfigured: () => true,
+        onStatus: (status) => statuses.push(status),
+    });
+
+    scheduler.schedule();
+    await nextTurn();
+
+    assert.equal(statuses.at(-1)?.kind, "FIRST_SYNC");
+    runs[0]?.resolve(successful);
+    await nextTurn();
+    scheduler.dispose();
+}
+
+async function publishesSyncProgressWithoutChangingThePrimaryState(): Promise<void> {
+    const statuses: SyncStatus[] = [];
+    let reportProgress:
+        | ((phase: "CHECKING_SERVER_VAULT" | "CLASSIFYING_LOCAL_FILES") => void)
+        | undefined;
+    const scheduler = new SyncScheduler({
+        run: async (_mode, report) => {
+            reportProgress = report;
+            return successful;
+        },
+        readActivity: async () => ({
+            hasPending: false,
+            hasConflicts: false,
+            initialBootstrapComplete: false,
+        }),
+        isConfigured: () => true,
+        onStatus: (status) => statuses.push(status),
+    });
+
+    const completed = scheduler.request();
+    await nextTurn();
+
+    reportProgress?.("CHECKING_SERVER_VAULT");
+    assert.equal(statuses.at(-1)?.kind, "FIRST_SYNC");
+    assert.equal(statuses.at(-1)?.phase, "CHECKING_SERVER_VAULT");
+
+    reportProgress?.("CLASSIFYING_LOCAL_FILES");
+    assert.equal(statuses.at(-1)?.kind, "FIRST_SYNC");
+    assert.equal(statuses.at(-1)?.phase, "CLASSIFYING_LOCAL_FILES");
+
+    await completed;
+    scheduler.dispose();
+}
+
+async function pausesOnlyAfterAnActiveCycleFinishes(): Promise<void> {
+    const runs: DeferredRun[] = [];
+    const statuses: SyncStatus[] = [];
+    let enabled = true;
+    const scheduler = new SyncScheduler({
+        run: (mode) => {
+            const deferred = new DeferredRun(mode);
+            runs.push(deferred);
+            return deferred.promise;
+        },
+        readActivity: async () => ({
+            hasPending: false,
+            hasConflicts: false,
+        }),
+        isConfigured: () => true,
+        isEnabled: () => enabled,
+        onStatus: (status) => statuses.push(status),
+    });
+
+    scheduler.schedule();
+    await nextTurn();
+    enabled = false;
+    scheduler.refreshAvailability();
+    runs[0]?.resolve(successful);
+    await nextTurn();
+
+    assert.equal(statuses.at(-1)?.kind, "PAUSED");
+    assert.notEqual(statuses.at(-1)?.lastSuccessfulAt, undefined);
+
+    enabled = true;
+    scheduler.refreshAvailability();
+    assert.equal(statuses.at(-1)?.kind, "IDLE");
     scheduler.dispose();
 }
 
@@ -151,5 +275,9 @@ function nextTurn(): Promise<void> {
 
 await schedulesAFollowUpForATriggerDuringSync();
 await runsAQueuedFullReconciliationAfterTheCurrentSync();
-await reportsOfflineWithoutRetryingAnUnconfiguredServer();
+await reportsSetupRequiredWithoutRunningAnUnconfiguredServer();
 await reportsAnUnexpectedRunFailure();
+await reportsPausedWithoutRunning();
+await reportsFirstSyncWhileBootstrapIsIncomplete();
+await publishesSyncProgressWithoutChangingThePrimaryState();
+await pausesOnlyAfterAnActiveCycleFinishes();

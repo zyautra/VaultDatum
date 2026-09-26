@@ -1,9 +1,10 @@
 {
   "id": "vaultdatum",
   "name": "VaultDatum",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "minAppVersion": "1.6.0",
   "description": "Reliable, local-first synchronization with a VaultDatum server.",
-  "author": "VaultDatum",
+  "author": "zyautra",
+  "authorUrl": "https://github.com/zyautra",
   "isDesktopOnly": false
 }

@@ -312,6 +312,7 @@ async function skipsOversizedAttachmentsDuringReconciliation(): Promise<void> {
         oversized: 1,
         offline: false,
         vaultMismatch: false,
+        initialBootstrap: true,
     });
     assert.deepEqual(await store.pendingOperations(), []);
     store.close();
@@ -1396,6 +1397,7 @@ async function pullsTheLatestContentAfterAnOwnIntermediateChange(): Promise<void
         oversized: 0,
         offline: false,
         vaultMismatch: false,
+        initialBootstrap: true,
     });
     assert.equal(await vault.hash(pending.path), remoteHash);
     assert.equal((await store.syncState()).serverCursor, 2);
@@ -1517,6 +1519,7 @@ async function continuesPullingUnrelatedPathsAfterAConflict(): Promise<void> {
         oversized: 0,
         offline: false,
         vaultMismatch: false,
+        initialBootstrap: true,
     });
     assert.equal(
         await vault.hash(conflictPath),

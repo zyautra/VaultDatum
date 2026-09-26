@@ -47,17 +47,26 @@ A committed operation is idempotently replayed if its response was lost.
 
 ## Current Sync Slice
 
-The Obsidian plugin has a **Server URL** setting. After the plugin has started,
-a new, modified, deleted, renamed, or moved file outside `.obsidian/` is captured as
-a durable operation before it is eligible for upload. Empty directories are also
-captured and applied as first-class entries; non-empty directories are never
-implicitly renamed or deleted recursively. Local events, plugin startup, app
-foregrounding, network recovery, server notifications, and retry timers all
-schedule a serialized sync cycle. A trigger that arrives during a cycle causes
-one follow-up cycle, so **Sync now** is an optional manual retry rather than a
-requirement for normal synchronization. The plugin reports `Syncing`, `Up to
-date`, `Pending`, `Offline`, `Conflict`, or `Error` in its desktop status bar
-and settings screen. MODIFY and DELETE retain
+The Obsidian plugin's settings tab is the **Sync overview**. It keeps a Server
+URL draft locally while the user types, then offers **Test connection** and
+**Save and start sync**. A reachable server with a different Vault identity is
+never adopted automatically; an unavailable URL may still be saved for an
+offline or VPN-reconnect workflow. A private-network hint is shown only while
+editing an `http://` URL.
+
+After the plugin has started, a new, modified, deleted, renamed, or moved file
+outside `.obsidian/` is captured as a durable operation before it is eligible
+for upload. Empty directories are also captured and applied as first-class
+entries; non-empty directories are never implicitly renamed or deleted
+recursively. Local events, plugin startup, app foregrounding, network recovery,
+server notifications, and retry timers all schedule a serialized sync cycle. A
+trigger that arrives during a cycle causes one follow-up cycle, so **Sync now**
+is an optional manual retry rather than a requirement for normal
+synchronization. Automatic synchronization can be paused without losing local
+changes. The status bar and settings overview report `Connect server`, `First
+sync`, `Syncing`, `Up to date`, `Pending`, `Offline`, `Conflict`, `Error`, or
+`Paused`, together with the last successful sync time and pending/conflict
+counts. MODIFY and DELETE retain
 the last replicated revision and content hash as their base condition. A
 same-directory path change is a RENAME; a change of parent directory is a MOVE.
 Both use a PRESENT source base and an UNKNOWN destination base, then commit both
@@ -126,6 +135,13 @@ original path and queues this device's content as a new file at a user-selected
 path. **Resolve conflict: merge manually** shows the Server and local Markdown
 versions, then queues the user-edited result as a new MODIFY operation.
 
+The overview offers **Check all files**, conflict review, and redacted
+diagnostic copying. **Reset sync tracking** is available only when no pending
+or recovery work remains; it preserves both Vaults and local notes while
+rebuilding this device's replica and cursor state through server-first
+bootstrap. **Reset connection settings** only removes the saved Server URL and
+pause preference; it does not clear sync tracking or local files.
+
 ## Update Client Protocol Types
 
 The OpenAPI document is the wire-contract source of truth. Regenerate the
@@ -187,8 +203,8 @@ cluster:
   -Dquarkus.package.jar.enabled=false \
   --no-daemon
 docker build -f server/src/main/docker/Dockerfile.native \
-  -t registry.example.com/vaultdatum/server:0.2.0 server
-docker push registry.example.com/vaultdatum/server:0.2.0
+  -t registry.example.com/vaultdatum/server:0.3.0 server
+docker push registry.example.com/vaultdatum/server:0.3.0
 ```
 
 Create an organization-specific overlay outside source control (or use a
@@ -208,7 +224,7 @@ resources:
 images:
   - name: vaultdatum-server
     newName: registry.example.com/vaultdatum/server
-    newTag: "0.2.0"
+    newTag: "0.3.0"
 ```
 
 Apply the overlay and wait for the one authoritative server Pod:

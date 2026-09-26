@@ -159,6 +159,27 @@ interface InitialBootstrapMetadata {
     };
 }
 
+interface SyncUiMetadata {
+    readonly key: "sync-ui";
+    readonly value: {
+        readonly lastSuccessfulAt?: string;
+    };
+}
+
+export interface ClientSyncActivity {
+    readonly pendingCount: number;
+    readonly conflictCount: number;
+    readonly initialBootstrapComplete: boolean;
+}
+
+export interface SyncTrackingResetEligibility {
+    readonly pendingCount: number;
+    readonly conflictCount: number;
+    readonly storedOperationCount: number;
+    readonly recoveryOperationCount: number;
+    readonly eligible: boolean;
+}
+
 export interface LocalScanBaseline {
     readonly path: string;
     readonly contentHash: string;
@@ -340,6 +361,110 @@ export class ClientStore {
             .sort((left, right) =>
                 left.createdAt.localeCompare(right.createdAt),
             );
+    }
+
+    public async syncActivity(): Promise<ClientSyncActivity> {
+        const [operations, conflicts, initialBootstrapComplete] =
+            await Promise.all([
+                this.pendingRecords(),
+                this.conflicts(),
+                this.isInitialBootstrapComplete(),
+            ]);
+        const pendingCount = operations.filter(
+            (operation) =>
+                operation.status === "READY" ||
+                operation.status === "IN_FLIGHT",
+        ).length;
+
+        return {
+            pendingCount,
+            conflictCount: conflicts.length,
+            initialBootstrapComplete,
+        };
+    }
+
+    public async lastSuccessfulSyncAt(): Promise<string | undefined> {
+        const metadata = await this.metadata<SyncUiMetadata>("sync-ui");
+        const timestamp = metadata?.value.lastSuccessfulAt;
+        return isTimestamp(timestamp) ? timestamp : undefined;
+    }
+
+    public async recordSuccessfulSync(timestamp: string): Promise<void> {
+        if (!isTimestamp(timestamp)) {
+            throw new Error("VaultDatum sync timestamp must be valid");
+        }
+
+        await this.saveMetadata({
+            key: "sync-ui",
+            value: { lastSuccessfulAt: timestamp },
+        });
+    }
+
+    public async resetEligibility(): Promise<SyncTrackingResetEligibility> {
+        const [operations, conflicts, applyIntents, keepBoth, manualMerges] =
+            await Promise.all([
+                this.pendingRecords(),
+                this.conflicts(),
+                this.applyIntents(),
+                this.keepBothResolutions(),
+                this.manualMergeResolutions(),
+            ]);
+        const pendingCount = operations.filter(
+            (operation) =>
+                operation.status === "READY" ||
+                operation.status === "IN_FLIGHT",
+        ).length;
+        const recoveryOperationCount =
+            applyIntents.length + keepBoth.length + manualMerges.length;
+
+        return {
+            pendingCount,
+            conflictCount: conflicts.length,
+            storedOperationCount: operations.length,
+            recoveryOperationCount,
+            eligible:
+                operations.length === 0 &&
+                conflicts.length === 0 &&
+                recoveryOperationCount === 0,
+        };
+    }
+
+    public async resetSyncTracking(): Promise<void> {
+        const eligibility = await this.resetEligibility();
+        if (!eligibility.eligible) {
+            throw new Error(
+                "VaultDatum cannot reset sync tracking while changes or recovery work remain",
+            );
+        }
+
+        const transaction = this.database.transaction(
+            [
+                METADATA_STORE,
+                PENDING_STORE,
+                ARTIFACT_STORE,
+                REPLICA_STORE,
+                LOCAL_SCAN_STORE,
+                APPLY_STORE,
+                CONFLICT_STORE,
+                KEEP_BOTH_STORE,
+                MANUAL_MERGE_STORE,
+            ],
+            "readwrite",
+        );
+        const metadata = transaction.objectStore(METADATA_STORE);
+        metadata.delete("sync-state");
+        metadata.delete("local-scan-initialized");
+        metadata.delete("initial-bootstrap");
+        metadata.delete("sync-ui");
+        transaction.objectStore(PENDING_STORE).clear();
+        transaction.objectStore(ARTIFACT_STORE).clear();
+        transaction.objectStore(REPLICA_STORE).clear();
+        transaction.objectStore(LOCAL_SCAN_STORE).clear();
+        transaction.objectStore(APPLY_STORE).clear();
+        transaction.objectStore(CONFLICT_STORE).clear();
+        transaction.objectStore(KEEP_BOTH_STORE).clear();
+        transaction.objectStore(MANUAL_MERGE_STORE).clear();
+        await transactionDone(transaction);
     }
 
     public async hasStoredOperations(): Promise<boolean> {
@@ -873,7 +998,8 @@ export class ClientStore {
             | ClientIdMetadata
             | SyncStateMetadata
             | LocalScanMetadata
-            | InitialBootstrapMetadata,
+            | InitialBootstrapMetadata
+            | SyncUiMetadata,
     ): Promise<void> {
         await this.put(METADATA_STORE, metadata);
     }
@@ -979,6 +1105,10 @@ function isPathChange(
         pending.type === "DIRECTORY_RENAME" ||
         pending.type === "DIRECTORY_MOVE"
     );
+}
+
+function isTimestamp(value: string | undefined): value is string {
+    return value !== undefined && Number.isFinite(Date.parse(value));
 }
 
 function openDatabase(databaseName: string): Promise<IDBDatabase> {

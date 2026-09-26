@@ -40,3 +40,6 @@ deploy/kubernetes/overlays/*-local/
 .vscode/
 *.iml
 .DS_Store
+
+# VS Code Java extension output
+server/bin/
