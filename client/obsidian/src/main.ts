@@ -1663,7 +1663,52 @@ class KeepBothDestinationModal extends Modal {
     }
 }
 
+type MergePane = "SERVER" | "LOCAL" | "RESULT";
+
+type MergeSource = Exclude<MergePane, "RESULT">;
+
+const MERGE_PANES: readonly MergePane[] = ["SERVER", "LOCAL", "RESULT"];
+
+function mergePaneName(pane: MergePane): string {
+    switch (pane) {
+        case "SERVER":
+            return "Server";
+        case "LOCAL":
+            return "This device";
+        case "RESULT":
+            return "Merged result";
+    }
+}
+
+function mergeSourceActionName(source: MergeSource): string {
+    return source === "SERVER" ? "Server version" : "this device's version";
+}
+
+function mergeSourceName(source: MergeSource): string {
+    return source === "SERVER" ? "Server version" : "This device's version";
+}
+
 class ManualMergeModal extends Modal {
+    private activePane: MergePane = "RESULT";
+
+    private cancelButton: HTMLButtonElement | undefined;
+
+    private result: HTMLTextAreaElement | undefined;
+
+    private resultFeedback: HTMLElement | undefined;
+
+    private resultSelection: MergeSource = "LOCAL";
+
+    private resultSelectionContent = "";
+
+    private saveButton: HTMLButtonElement | undefined;
+
+    private saving = false;
+
+    private readonly tabButtons = new Map<MergePane, HTMLButtonElement>();
+
+    private workspace: HTMLElement | undefined;
+
     public constructor(
         app: App,
         private readonly path: string,
@@ -1675,48 +1720,308 @@ class ManualMergeModal extends Modal {
     }
 
     public onOpen(): void {
-        this.setTitle(`Merge ${this.path}`);
-        this.contentEl.createEl("p", {
-            text: "Review both versions, then edit the merged result. The Server version stays authoritative until the new change is committed.",
+        this.modalEl.classList.add("vaultdatum-merge-modal");
+        this.contentEl.classList.add("vaultdatum-merge-content");
+        this.setTitle("Resolve conflict");
+        this.contentEl.createDiv({
+            cls: "vaultdatum-merge-path",
+            text: this.path,
         });
-        this.readOnlyArea("Server version", this.serverContent);
-        this.readOnlyArea("This device's version", this.localContent);
-        const result = this.editableArea("Merged result", this.localContent);
+        this.contentEl.createEl("p", {
+            cls: "vaultdatum-merge-introduction",
+            text: "Compare both versions and prepare the result to save. The Server version remains authoritative until the new change is accepted.",
+        });
+        this.createTabs();
+        this.createWorkspace();
+        this.createActions();
+        this.activatePane(this.activePane);
+    }
+
+    public onClose(): void {
+        this.contentEl.empty();
+        this.modalEl.classList.remove("vaultdatum-merge-modal");
+        this.tabButtons.clear();
+        this.workspace = undefined;
+        this.result = undefined;
+        this.resultFeedback = undefined;
+        this.saveButton = undefined;
+        this.cancelButton = undefined;
+    }
+
+    private activatePane(pane: MergePane): void {
+        this.activePane = pane;
+        this.workspace?.setAttribute("data-active-pane", pane);
+        for (const [tabPane, button] of this.tabButtons) {
+            const active = tabPane === pane;
+            button.setAttribute("aria-selected", String(active));
+            button.tabIndex = active ? 0 : -1;
+        }
+    }
+
+    private createActions(): void {
+        const actions = this.contentEl.createDiv({
+            cls: "vaultdatum-merge-actions",
+        });
+        this.cancelButton = actions.createEl("button", {
+            text: "Cancel",
+            attr: { type: "button" },
+        });
+        this.cancelButton.addEventListener("click", () => this.close());
+
+        this.saveButton = actions.createEl("button", {
+            cls: "mod-cta",
+            text: "Save merged result",
+            attr: { type: "button" },
+        });
+        this.saveButton.addEventListener("click", () => {
+            void this.saveResult();
+        });
+    }
+
+    private createResultPanel(workspace: HTMLElement): void {
+        const panel = workspace.createDiv({
+            cls: "vaultdatum-merge-panel vaultdatum-merge-result",
+            attr: {
+                "data-merge-pane": "RESULT",
+                id: "vaultdatum-merge-result",
+                role: "tabpanel",
+            },
+        });
+        panel.createEl("h3", { text: "Merged result" });
+        this.resultFeedback = panel.createEl("p", {
+            cls: "vaultdatum-merge-result-feedback",
+            attr: { "aria-live": "polite" },
+        });
+        this.result = panel.createEl("textarea", {
+            cls: "vaultdatum-merge-editor",
+            attr: {
+                "aria-label": "Merged result",
+                rows: "16",
+                spellcheck: "false",
+            },
+        });
+        this.result.value = this.localContent;
+        this.resultSelectionContent = this.result.value;
+        this.result.addEventListener("input", () => {
+            this.updateResultFeedback();
+        });
+        this.updateResultFeedback();
+    }
+
+    private createSourcePanel(
+        workspace: HTMLElement,
+        source: MergeSource,
+        content: string,
+    ): void {
+        const sourceName = mergeSourceName(source);
+        const panel = workspace.createDiv({
+            cls: "vaultdatum-merge-panel vaultdatum-merge-source",
+            attr: {
+                "data-merge-pane": source,
+                id: `vaultdatum-merge-${source.toLowerCase()}`,
+                role: "tabpanel",
+            },
+        });
+        panel.createEl("h3", { text: sourceName });
+        panel.createEl("p", {
+            cls: "vaultdatum-merge-panel-description",
+            text: "Read-only source",
+        });
+        const area = panel.createEl("textarea", {
+            cls: "vaultdatum-merge-editor",
+            attr: {
+                "aria-label": sourceName,
+                rows: "14",
+                readonly: "true",
+                spellcheck: "false",
+            },
+        });
+        area.value = content;
+        const useSource = panel.createEl("button", {
+            text: `Use ${mergeSourceActionName(source)} as result`,
+            attr: { type: "button" },
+        });
+        useSource.addEventListener("click", () => {
+            this.requestResultReplacement(source);
+        });
+    }
+
+    private createTabs(): void {
+        const tabs = this.contentEl.createDiv({
+            cls: "vaultdatum-merge-tabs",
+            attr: { role: "tablist", "aria-label": "Manual merge panels" },
+        });
+        for (const pane of MERGE_PANES) {
+            const button = tabs.createEl("button", {
+                text: mergePaneName(pane),
+                attr: {
+                    type: "button",
+                    role: "tab",
+                    "aria-controls": `vaultdatum-merge-${pane.toLowerCase()}`,
+                },
+            });
+            button.addEventListener("click", () => this.activatePane(pane));
+            button.addEventListener("keydown", (event) => {
+                this.handleTabKeydown(event, pane);
+            });
+            this.tabButtons.set(pane, button);
+        }
+    }
+
+    private createWorkspace(): void {
+        this.workspace = this.contentEl.createDiv({
+            cls: "vaultdatum-merge-workspace",
+        });
+        this.createSourcePanel(this.workspace, "SERVER", this.serverContent);
+        this.createSourcePanel(this.workspace, "LOCAL", this.localContent);
+        this.createResultPanel(this.workspace);
+    }
+
+    private handleTabKeydown(event: KeyboardEvent, pane: MergePane): void {
+        const direction =
+            event.key === "ArrowRight" ? 1 : event.key === "ArrowLeft" ? -1 : 0;
+        if (direction === 0) {
+            return;
+        }
+
+        event.preventDefault();
+        const currentIndex = MERGE_PANES.indexOf(pane);
+        const nextIndex =
+            (currentIndex + direction + MERGE_PANES.length) %
+            MERGE_PANES.length;
+        const nextPane = MERGE_PANES[nextIndex];
+        this.activatePane(nextPane);
+        this.tabButtons.get(nextPane)?.focus();
+    }
+
+    private hasUnsavedResultEdits(): boolean {
+        return this.result?.value !== this.resultSelectionContent;
+    }
+
+    private requestResultReplacement(source: MergeSource): void {
+        if (this.saving) {
+            return;
+        }
+        if (!this.hasUnsavedResultEdits()) {
+            this.selectResultSource(source);
+            return;
+        }
+
+        new ReplaceManualMergeResultModal(
+            this.app,
+            mergeSourceActionName(source),
+            () => this.selectResultSource(source),
+        ).open();
+    }
+
+    private selectResultSource(source: MergeSource): void {
+        const result = this.result;
+        if (result === undefined) {
+            return;
+        }
+
+        result.value =
+            source === "SERVER" ? this.serverContent : this.localContent;
+        this.resultSelection = source;
+        this.resultSelectionContent = result.value;
+        this.updateResultFeedback();
+        this.activatePane("RESULT");
+        result.focus();
+    }
+
+    private async saveResult(): Promise<void> {
+        const result = this.result;
+        if (result === undefined || this.saving) {
+            return;
+        }
+
+        this.saving = true;
+        this.updateSaveControls();
+        this.resultFeedback?.setText("Saving the merged result…");
+        try {
+            if (await this.save(result.value)) {
+                this.close();
+                return;
+            }
+        } catch {
+            console.warn("VaultDatum manual merge save failed");
+        }
+
+        this.saving = false;
+        this.updateSaveControls();
+        this.resultFeedback?.setText(
+            "Could not save the merged result. Neither source version was changed.",
+        );
+    }
+
+    private updateResultFeedback(): void {
+        if (this.saving) {
+            return;
+        }
+        if (this.hasUnsavedResultEdits()) {
+            this.resultFeedback?.setText(
+                "Custom result with unsaved edits. Choosing a source will replace this result.",
+            );
+            return;
+        }
+        this.resultFeedback?.setText(
+            this.resultSelection === "LOCAL"
+                ? "Result starts with this device's version."
+                : "Result uses the Server version.",
+        );
+    }
+
+    private updateSaveControls(): void {
+        this.saveButton?.setText(
+            this.saving ? "Saving…" : "Save merged result",
+        );
+        this.saveButton?.toggleAttribute("disabled", this.saving);
+        this.cancelButton?.toggleAttribute("disabled", this.saving);
+    }
+}
+
+class ReplaceManualMergeResultModal extends Modal {
+    private confirmed = false;
+
+    public constructor(
+        app: App,
+        private readonly sourceName: string,
+        private readonly replace: () => void,
+    ) {
+        super(app);
+    }
+
+    public onOpen(): void {
+        this.setTitle("Replace merged result?");
+        this.contentEl.createEl("p", {
+            text: `Use ${this.sourceName} as the new result? Your unsaved result text will be replaced.`,
+        });
+        this.contentEl.createEl("p", {
+            text: "Neither the Server version nor this device's version will be changed.",
+        });
         new Setting(this.contentEl)
             .addButton((button) =>
-                button.setButtonText("Cancel").onClick(() => this.close()),
+                button
+                    .setButtonText("Keep editing")
+                    .onClick(() => this.close()),
             )
             .addButton((button) =>
                 button
-                    .setButtonText("Save merged result")
-                    .setCta()
+                    .setButtonText(`Use ${this.sourceName}`)
+                    .setWarning()
                     .onClick(() => {
-                        void this.save(result.value).then((saved) => {
-                            if (saved) {
-                                this.close();
-                            }
-                        });
+                        if (this.confirmed) {
+                            return;
+                        }
+                        this.confirmed = true;
+                        this.replace();
+                        this.close();
                     }),
             );
     }
 
     public onClose(): void {
         this.contentEl.empty();
-    }
-
-    private readOnlyArea(label: string, value: string): void {
-        const area = this.contentEl.createEl("textarea", {
-            attr: { "aria-label": label, rows: "10", readonly: "true" },
-        });
-        area.value = value;
-    }
-
-    private editableArea(label: string, value: string): HTMLTextAreaElement {
-        const area = this.contentEl.createEl("textarea", {
-            attr: { "aria-label": label, rows: "12" },
-        });
-        area.value = value;
-        return area;
     }
 }
 

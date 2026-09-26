@@ -1,0 +1,144 @@
+.modal.vaultdatum-merge-modal {
+    width: min(960px, calc(100vw - 32px));
+    max-width: 960px;
+}
+
+.vaultdatum-merge-content {
+    min-width: 0;
+}
+
+.vaultdatum-merge-path {
+    color: var(--text-muted);
+    font-family: var(--font-monospace);
+    overflow-wrap: anywhere;
+}
+
+.vaultdatum-merge-introduction {
+    margin: var(--size-4-2) 0 var(--size-4-4);
+}
+
+.vaultdatum-merge-tabs {
+    display: none;
+}
+
+.vaultdatum-merge-workspace {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: var(--size-4-3);
+}
+
+.vaultdatum-merge-panel {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    padding: var(--size-4-3);
+    border: 1px solid var(--background-modifier-border);
+    border-radius: var(--radius-m);
+    background: var(--background-secondary);
+}
+
+.vaultdatum-merge-panel h3 {
+    margin: 0;
+    color: var(--text-normal);
+    font-size: var(--font-ui-medium);
+}
+
+.vaultdatum-merge-panel-description,
+.vaultdatum-merge-result-feedback {
+    min-height: 1.5em;
+    margin: var(--size-4-1) 0 var(--size-4-2);
+    color: var(--text-muted);
+    font-size: var(--font-ui-small);
+}
+
+.vaultdatum-merge-result {
+    grid-column: 1 / -1;
+    border-color: var(--interactive-accent);
+    background: var(--background-primary);
+}
+
+.vaultdatum-merge-editor {
+    box-sizing: border-box;
+    width: 100%;
+    min-height: 18rem;
+    margin-bottom: var(--size-4-2);
+    resize: vertical;
+    font-family: var(--font-monospace);
+    line-height: 1.5;
+}
+
+.vaultdatum-merge-result .vaultdatum-merge-editor {
+    min-height: 22rem;
+}
+
+.vaultdatum-merge-source button {
+    align-self: flex-start;
+}
+
+.vaultdatum-merge-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: var(--size-4-2);
+    margin-top: var(--size-4-4);
+}
+
+@media (max-width: 700px) {
+    .modal.vaultdatum-merge-modal {
+        width: calc(100vw - 20px);
+    }
+
+    .vaultdatum-merge-tabs {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: var(--size-2-2);
+        margin-bottom: var(--size-4-3);
+    }
+
+    .vaultdatum-merge-tabs button {
+        min-width: 0;
+        padding-right: var(--size-2-2);
+        padding-left: var(--size-2-2);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+
+    .vaultdatum-merge-tabs button[aria-selected="true"] {
+        color: var(--text-on-accent);
+        background-color: var(--interactive-accent);
+    }
+
+    .vaultdatum-merge-workspace {
+        display: block;
+    }
+
+    .vaultdatum-merge-panel {
+        display: none;
+    }
+
+    .vaultdatum-merge-workspace[data-active-pane="SERVER"]
+        .vaultdatum-merge-panel[data-merge-pane="SERVER"],
+    .vaultdatum-merge-workspace[data-active-pane="LOCAL"]
+        .vaultdatum-merge-panel[data-merge-pane="LOCAL"],
+    .vaultdatum-merge-workspace[data-active-pane="RESULT"]
+        .vaultdatum-merge-panel[data-merge-pane="RESULT"] {
+        display: flex;
+    }
+
+    .vaultdatum-merge-editor,
+    .vaultdatum-merge-result .vaultdatum-merge-editor {
+        min-height: min(48vh, 28rem);
+    }
+
+    .vaultdatum-merge-actions {
+        position: sticky;
+        bottom: 0;
+        justify-content: stretch;
+        padding-top: var(--size-4-2);
+        background: var(--background-primary);
+    }
+
+    .vaultdatum-merge-actions button {
+        flex: 1 1 0;
+    }
+}

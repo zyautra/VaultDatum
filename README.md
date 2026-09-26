@@ -132,8 +132,11 @@ against the latest Server file. **Resolve conflict: restore Local** creates an
 explicit restore operation only when the latest Server state is a deleted
 tombstone. **Resolve conflict: keep Both** keeps the Server file at its
 original path and queues this device's content as a new file at a user-selected
-path. **Resolve conflict: merge manually** shows the Server and local Markdown
-versions, then queues the user-edited result as a new MODIFY operation.
+path. **Resolve conflict: merge manually** presents read-only Server and local
+Markdown sources alongside a distinct editable result. On narrow screens, the
+same panes are available through tabs. The result starts with this device's
+version, can explicitly be replaced with either source, and queues the
+user-edited result as a new MODIFY operation.
 
 The overview offers **Check all files**, conflict review, and redacted
 diagnostic copying. **Reset sync tracking** is available only when no pending
@@ -203,8 +206,8 @@ cluster:
   -Dquarkus.package.jar.enabled=false \
   --no-daemon
 docker build -f server/src/main/docker/Dockerfile.native \
-  -t registry.example.com/vaultdatum/server:0.3.0 server
-docker push registry.example.com/vaultdatum/server:0.3.0
+  -t registry.example.com/vaultdatum/server:0.3.1 server
+docker push registry.example.com/vaultdatum/server:0.3.1
 ```
 
 Create an organization-specific overlay outside source control (or use a
@@ -224,7 +227,7 @@ resources:
 images:
   - name: vaultdatum-server
     newName: registry.example.com/vaultdatum/server
-    newTag: "0.3.0"
+    newTag: "0.3.1"
 ```
 
 Apply the overlay and wait for the one authoritative server Pod:
