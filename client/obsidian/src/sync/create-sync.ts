@@ -462,12 +462,54 @@ export class CreateSync {
 
         try {
             await this.remoteApply.recoverInterruptedApplies();
-            const local = await this.reconcileLocalVault();
-            oversized = local.oversized;
+            const bootstrapRequired =
+                !(await this.store.isInitialBootstrapComplete());
+            let local: {
+                readonly conflicted: number;
+                readonly oversized: number;
+            };
+            let beforePush: PullSummary;
 
-            let beforePush = fullReconciliation
-                ? await this.reconcileServerManifest(serverUrl)
-                : await this.pull(serverUrl);
+            if (bootstrapRequired) {
+                const preManifest = await this.reconcileLocalVault(false);
+                oversized = preManifest.oversized;
+                let preManifestConflicted = preManifest.conflicted;
+
+                if (
+                    !fullReconciliation &&
+                    (await this.store.hasStoredOperations())
+                ) {
+                    const recovered = await this.pull(serverUrl);
+                    preManifestConflicted += recovered.conflicted;
+                    if (recovered.unavailable) {
+                        return unavailable(0, preManifestConflicted, oversized);
+                    }
+                }
+
+                beforePush = await this.reconcileServerManifest(serverUrl);
+                if (beforePush.unavailable) {
+                    return unavailable(
+                        0,
+                        preManifestConflicted + beforePush.conflicted,
+                        oversized,
+                    );
+                }
+
+                local = await this.reconcileLocalVault(true);
+                oversized = local.oversized;
+                local = {
+                    conflicted: preManifestConflicted + local.conflicted,
+                    oversized,
+                };
+                await this.store.completeInitialBootstrap();
+            } else {
+                local = await this.reconcileLocalVault(false);
+                oversized = local.oversized;
+                beforePush = fullReconciliation
+                    ? await this.reconcileServerManifest(serverUrl)
+                    : await this.pull(serverUrl);
+            }
+
             let beforePushConflicted = local.conflicted + beforePush.conflicted;
 
             if (beforePush.unavailable) {
@@ -562,7 +604,9 @@ export class CreateSync {
         }
     }
 
-    private async reconcileLocalVault(): Promise<{
+    private async reconcileLocalVault(
+        includeInitialUntracked: boolean,
+    ): Promise<{
         readonly conflicted: number;
         readonly oversized: number;
     }> {
@@ -688,7 +732,10 @@ export class CreateSync {
             }
 
             const baseline = await this.store.localScanBaseline(path);
-            if (baseline?.contentHash === file.contentHash) {
+            if (
+                !includeInitialUntracked &&
+                baseline?.contentHash === file.contentHash
+            ) {
                 continue;
             }
             await this.captureModify(path, file.content);
@@ -702,7 +749,12 @@ export class CreateSync {
             ) {
                 continue;
             }
-            await this.captureDirectoryCreate(path);
+            if (
+                includeInitialUntracked ||
+                (await this.store.localScanBaseline(path)) === undefined
+            ) {
+                await this.captureDirectoryCreate(path);
+            }
         }
 
         return { conflicted, oversized: oversizedPaths.size };

@@ -444,7 +444,12 @@ async function recoversAMissedLocalModificationDuringIntegrityScan(): Promise<vo
     await vault.writeFile(path, local);
     const sync = new CreateSync(
         store,
-        new FullReconciliationTransport(1, 1, [], new Map()),
+        new FullReconciliationTransport(
+            1,
+            1,
+            [presentManifestEntry(path, 1, baseHash, base.byteLength)],
+            new Map([[path, base]]),
+        ),
         vault,
         () => "https://vaultdatum.test",
     );
@@ -452,6 +457,7 @@ async function recoversAMissedLocalModificationDuringIntegrityScan(): Promise<vo
     const summary = await sync.sync();
 
     assert.equal(summary.offline, true);
+    assert.equal(summary.conflicted, 0);
     const [pending] = await store.pendingOperations();
     assert.equal(pending?.type, "MODIFY");
     assert.equal(pending?.path, path);
@@ -460,13 +466,54 @@ async function recoversAMissedLocalModificationDuringIntegrityScan(): Promise<vo
         assert.equal(pending.baseContentHash, baseHash);
         assert.equal(pending.contentHash, await contentHash(local));
     }
+    assert.equal(await store.hasConflict(path), false);
+    assert.equal(await store.isInitialBootstrapComplete(), true);
     store.close();
 }
 
-async function preservesInitialUntrackedFilesUntilTheyChange(): Promise<void> {
+async function preservesAMissedLocalDeletionDuringInitialBootstrap(): Promise<void> {
+    const path = "notes/missed-local-delete.md";
+    const base = bytes("Replicated base content");
+    const baseHash = await contentHash(base);
+    const store = await ClientStore.open(
+        `test-local-delete-bootstrap-${crypto.randomUUID()}`,
+    );
+    await store.advanceCursor("V-reconciliation", 1);
+    await store.putReplica({
+        path,
+        entryType: "FILE",
+        state: "PRESENT",
+        revision: 1,
+        contentHash: baseHash,
+        size: base.byteLength,
+    });
+    const sync = new CreateSync(
+        store,
+        new FullReconciliationTransport(
+            1,
+            1,
+            [presentManifestEntry(path, 1, baseHash, base.byteLength)],
+            new Map([[path, base]]),
+        ),
+        new MemoryVault(),
+        () => "https://vaultdatum.test",
+    );
+
+    const summary = await sync.sync();
+
+    assert.equal(summary.offline, true);
+    assert.equal(summary.conflicted, 0);
+    const [pending] = await store.pendingOperations();
+    assert.equal(pending?.type, "DELETE");
+    assert.equal(pending?.path, path);
+    assert.equal(await store.hasConflict(path), false);
+    assert.equal(await store.isInitialBootstrapComplete(), true);
+    store.close();
+}
+
+async function queuesInitialUntrackedFilesAfterServerManifest(): Promise<void> {
     const path = "notes/preexisting-local.md";
     const initial = bytes("Pre-existing local content");
-    const changed = bytes("A later local edit after plugin setup");
     const store = await ClientStore.open(
         `test-local-baseline-${crypto.randomUUID()}`,
     );
@@ -481,16 +528,34 @@ async function preservesInitialUntrackedFilesUntilTheyChange(): Promise<void> {
 
     const initialSummary = await sync.sync();
 
-    assert.equal(initialSummary.offline, false);
-    assert.deepEqual(await store.pendingOperations(), []);
-
-    await vault.writeFile(path, changed);
-    const changedSummary = await sync.sync();
-
-    assert.equal(changedSummary.offline, true);
+    assert.equal(initialSummary.offline, true);
     const [pending] = await store.pendingOperations();
     assert.equal(pending?.type, "CREATE");
     assert.equal(pending?.path, path);
+    assert.equal(await store.isInitialBootstrapComplete(), true);
+    store.close();
+}
+
+async function doesNotCompleteBootstrapWhileTheServerIsUnavailable(): Promise<void> {
+    const path = "notes/wait-for-server.md";
+    const local = bytes("Must not upload before a server manifest");
+    const store = await ClientStore.open(
+        `test-bootstrap-server-unavailable-${crypto.randomUUID()}`,
+    );
+    const vault = new MemoryVault();
+    await vault.writeFile(path, local);
+    const sync = new CreateSync(
+        store,
+        new NoopTransport(),
+        vault,
+        () => "https://vaultdatum.test",
+    );
+
+    const summary = await sync.sync();
+
+    assert.equal(summary.offline, true);
+    assert.equal(await store.isInitialBootstrapComplete(), false);
+    assert.deepEqual(await store.pendingOperations(), []);
     store.close();
 }
 
@@ -1005,12 +1070,20 @@ async function excludesObsidianConfigurationFromEventsAndReconciliation(): Promi
 
     assert.equal(captured, undefined);
     assert.equal(summary.conflicted, 0);
+    assert.equal(summary.offline, true);
     assert.equal(await store.localScanBaseline(configurationPath), undefined);
     assert.equal(
         (await store.localScanBaseline(notePath))?.contentHash,
         await contentHash(note),
     );
-    assert.deepEqual(await store.pendingOperations(), []);
+    const pending = await store.pendingOperations();
+    assert.equal(pending.length, 1);
+    assert.equal(pending[0]?.type, "CREATE");
+    assert.equal(pending[0]?.path, notePath);
+    assert.equal(
+        pending.some((operation) => operation.path === configurationPath),
+        false,
+    );
     store.close();
 }
 
@@ -1327,6 +1400,7 @@ async function pullsTheLatestContentAfterAnOwnIntermediateChange(): Promise<void
     assert.equal(await vault.hash(pending.path), remoteHash);
     assert.equal((await store.syncState()).serverCursor, 2);
     assert.equal(await store.operation(operationId), undefined);
+    assert.equal(await store.isInitialBootstrapComplete(), true);
     store.close();
 }
 
@@ -2589,6 +2663,52 @@ class RetryingTransport extends NoopTransport {
         };
     }
 
+    public override async createManifest(
+        serverUrl: string,
+    ): Promise<ReadResult<RemoteManifestCreated>> {
+        void serverUrl;
+        return {
+            kind: "OK",
+            value: {
+                manifestId: "M-offline-retry",
+                vaultId: "V-offline-retry",
+                snapshotRevision: this.committed ? 1 : 0,
+                expiresAt: "2030-01-01T00:00:00Z",
+            },
+        };
+    }
+
+    public override async readManifest(
+        serverUrl: string,
+        manifestId: string,
+    ): Promise<ReadResult<RemoteManifest>> {
+        void serverUrl;
+        if (manifestId !== "M-offline-retry") {
+            return { kind: "MANIFEST_EXPIRED" };
+        }
+        return {
+            kind: "OK",
+            value: {
+                manifestId,
+                vaultId: "V-offline-retry",
+                snapshotRevision: this.committed ? 1 : 0,
+                expiresAt: "2030-01-01T00:00:00Z",
+                entries: this.committed
+                    ? [
+                          {
+                              path: this.path,
+                              entryType: "FILE",
+                              state: "PRESENT",
+                              revision: 1,
+                              contentHash: this.contentHashValue,
+                              size: this.size,
+                          },
+                      ]
+                    : [],
+            },
+        };
+    }
+
     public override async listChanges(
         serverUrl: string,
         after: number,
@@ -2870,7 +2990,9 @@ await refusesAnOversizedRemoteAttachmentBeforeDownloading();
 await initializesFromAManifestAndCatchesUpLaterChanges();
 await preservesExistingLocalContentDuringInitialManifestSync();
 await recoversAMissedLocalModificationDuringIntegrityScan();
-await preservesInitialUntrackedFilesUntilTheyChange();
+await preservesAMissedLocalDeletionDuringInitialBootstrap();
+await queuesInitialUntrackedFilesAfterServerManifest();
+await doesNotCompleteBootstrapWhileTheServerIsUnavailable();
 await quarantinesAFileThatReappearsAfterServerDeletion();
 await repairsAMissingReplicaEntryFromTheServerManifest();
 await preservesLocalContentWhenManifestDeletionOverlapsMissedEdit();

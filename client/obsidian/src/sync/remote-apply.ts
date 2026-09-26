@@ -143,6 +143,10 @@ export class RemoteApply {
 
         const pending = await this.store.pendingForPath(effect.path);
         if (pending !== undefined) {
+            if (manifestMatchesPendingBase(pending, after)) {
+                await this.store.putReplica(after);
+                return { conflicted: 0 };
+            }
             await this.recordConflict(
                 effect.path,
                 after,
@@ -1111,6 +1115,44 @@ function matches(
     return (
         actual?.entryType === "FILE" &&
         expected.contentHash === actual.contentHash
+    );
+}
+
+function manifestMatchesPendingBase(
+    pending: PendingOperation,
+    after: ReplicaEntry,
+): boolean {
+    if (pending.path !== after.path) {
+        return false;
+    }
+
+    if (pending.type === "CREATE") {
+        return (
+            pending.base.state === "DELETED" &&
+            after.state === "DELETED" &&
+            after.revision === pending.base.revision
+        );
+    }
+
+    if (
+        pending.type === "DIRECTORY_CREATE" ||
+        pending.type === "DIRECTORY_DELETE" ||
+        pending.type === "DIRECTORY_RENAME" ||
+        pending.type === "DIRECTORY_MOVE"
+    ) {
+        return (
+            after.entryType === "DIRECTORY" &&
+            after.state === "PRESENT" &&
+            "baseRevision" in pending &&
+            after.revision === pending.baseRevision
+        );
+    }
+
+    return (
+        after.entryType === "FILE" &&
+        after.state === "PRESENT" &&
+        after.revision === pending.baseRevision &&
+        after.contentHash === pending.baseContentHash
     );
 }
 

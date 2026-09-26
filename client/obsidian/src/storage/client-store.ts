@@ -150,6 +150,15 @@ interface LocalScanMetadata {
     readonly value: true;
 }
 
+interface InitialBootstrapMetadata {
+    readonly key: "initial-bootstrap";
+    readonly value: {
+        readonly policyVersion: 1;
+        readonly vaultId: string;
+        readonly complete: true;
+    };
+}
+
 export interface LocalScanBaseline {
     readonly path: string;
     readonly contentHash: string;
@@ -462,6 +471,37 @@ export class ClientStore {
         path: string,
     ): Promise<LocalScanBaseline | undefined> {
         return this.value<LocalScanBaseline>(LOCAL_SCAN_STORE, path);
+    }
+
+    public async isInitialBootstrapComplete(): Promise<boolean> {
+        const [state, bootstrap] = await Promise.all([
+            this.syncState(),
+            this.metadata<InitialBootstrapMetadata>("initial-bootstrap"),
+        ]);
+        return (
+            state.vaultId !== undefined &&
+            bootstrap?.value.policyVersion === 1 &&
+            bootstrap.value.vaultId === state.vaultId &&
+            bootstrap.value.complete
+        );
+    }
+
+    public async completeInitialBootstrap(): Promise<void> {
+        const state = await this.syncState();
+        if (state.vaultId === undefined) {
+            throw new Error(
+                "Cannot complete initial bootstrap without a Vault binding",
+            );
+        }
+
+        await this.saveMetadata({
+            key: "initial-bootstrap",
+            value: {
+                policyVersion: 1,
+                vaultId: state.vaultId,
+                complete: true,
+            },
+        } satisfies InitialBootstrapMetadata);
     }
 
     public async hasStoredOperationForPath(path: string): Promise<boolean> {
@@ -829,7 +869,11 @@ export class ClientStore {
     }
 
     private async saveMetadata(
-        metadata: ClientIdMetadata | SyncStateMetadata | LocalScanMetadata,
+        metadata:
+            | ClientIdMetadata
+            | SyncStateMetadata
+            | LocalScanMetadata
+            | InitialBootstrapMetadata,
     ): Promise<void> {
         await this.put(METADATA_STORE, metadata);
     }
