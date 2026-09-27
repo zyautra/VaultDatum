@@ -1,6 +1,7 @@
 vaultdatum:
   data-root: ${VAULTDATUM_DATA_ROOT:/data}
   max-content-bytes: ${VAULTDATUM_MAX_CONTENT_BYTES:8388608}
+  access-profile: ${VAULTDATUM_ACCESS_PROFILE:private-network}
 
 "%dev":
   vaultdatum:
