@@ -6,6 +6,11 @@ info:
     The protocol contract between the authoritative VaultDatum server and its
     replica clients. Realtime notifications may trigger synchronization, but
     correctness depends only on these HTTP operations.
+
+    A private-network deployment relies on its protected network. In a
+    public-token deployment, every /api/v1 HTTP operation requires the
+    VaultBearerToken Authorization header; notification WebSocket upgrades use
+    a one-time RealtimeTicket instead. Tokens and tickets never appear in URLs.
 servers:
   - url: http://localhost:8080
 tags:
@@ -67,6 +72,31 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "403":
           $ref: "#/components/responses/Forbidden"
+  /api/v1/realtime-tickets:
+    post:
+      tags:
+        - Realtime
+      operationId: createRealtimeTicket
+      summary: Issue a one-time ticket for the notification WebSocket
+      description: |
+        Available only to an authenticated public-token client. The returned
+        ticket is opaque, single-use, and expires within 60 seconds. Offer it
+        as `vaultdatum.ticket.<ticket>` alongside `vaultdatum.v1` in
+        Sec-WebSocket-Protocol; do not put it in a URL, cookie, or WebSocket
+        message.
+      security:
+        - VaultBearerToken: []
+      responses:
+        "201":
+          description: A short-lived ticket for one notification handshake
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RealtimeTicket"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "503":
+          $ref: "#/components/responses/ServerUnavailable"
   /api/v1/manifests:
     post:
       tags:
@@ -327,6 +357,12 @@ components:
             $ref: "#/components/schemas/ProtocolError"
     Unauthorized:
       description: Authentication is required
+      headers:
+        WWW-Authenticate:
+          description: Bearer challenge for a public-token deployment.
+          schema:
+            type: string
+            const: Bearer realm="vaultdatum"
       content:
         application/json:
           schema:
@@ -343,6 +379,11 @@ components:
         application/json:
           schema:
             $ref: "#/components/schemas/ProtocolError"
+  securitySchemes:
+    VaultBearerToken:
+      type: http
+      scheme: bearer
+      bearerFormat: VaultDatum Vault token
   schemas:
     HealthResponse:
       type: object
@@ -369,6 +410,21 @@ components:
       type: string
       minLength: 1
       description: Opaque identifier of a short-lived immutable manifest snapshot.
+    RealtimeTicket:
+      type: object
+      additionalProperties: false
+      required:
+        - ticket
+        - expiresAt
+      properties:
+        ticket:
+          type: string
+          minLength: 1
+          description: Opaque, single-use notification ticket. Treat as a secret.
+        expiresAt:
+          type: string
+          format: date-time
+          description: UTC instant after which the ticket cannot be used.
     CursorRevision:
       type: integer
       format: int64

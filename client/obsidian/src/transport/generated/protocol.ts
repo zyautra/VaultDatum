@@ -60,6 +60,30 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/realtime-tickets": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Issue a one-time ticket for the notification WebSocket
+         * @description Available only to an authenticated public-token client. The returned
+         *     ticket is opaque, single-use, and expires within 60 seconds. Offer it
+         *     as `vaultdatum.ticket.<ticket>` alongside `vaultdatum.v1` in
+         *     Sec-WebSocket-Protocol; do not put it in a URL, cookie, or WebSocket
+         *     message.
+         */
+        post: operations["createRealtimeTicket"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/manifests": {
         parameters: {
             query?: never;
@@ -188,6 +212,15 @@ export interface components {
         OperationId: string;
         /** @description Opaque identifier of a short-lived immutable manifest snapshot. */
         ManifestId: string;
+        RealtimeTicket: {
+            /** @description Opaque, single-use notification ticket. Treat as a secret. */
+            ticket: string;
+            /**
+             * Format: date-time
+             * @description UTC instant after which the ticket cannot be used.
+             */
+            expiresAt: string;
+        };
         /**
          * Format: int64
          * @description Contiguous committed revision cursor; zero means no changes processed.
@@ -564,6 +597,8 @@ export interface components {
         /** @description Authentication is required */
         Unauthorized: {
             headers: {
+                /** @description Bearer challenge for a public-token deployment. */
+                "WWW-Authenticate"?: 'Bearer realm="vaultdatum"';
                 [name: string]: unknown;
             };
             content: {
@@ -671,6 +706,28 @@ export interface operations {
             };
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
+        };
+    };
+    createRealtimeTicket: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description A short-lived ticket for one notification handshake */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RealtimeTicket"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            503: components["responses"]["ServerUnavailable"];
         };
     };
     createManifest: {
