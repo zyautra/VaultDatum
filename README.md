@@ -223,6 +223,7 @@ cluster:
   -Dquarkus.package.jar.enabled=false \
   --no-daemon
 docker build -f server/src/main/docker/Dockerfile.native \
+  --build-arg APP_VERSION=0.4.0 \
   -t registry.example.com/vaultdatum/server:0.4.0 server
 docker push registry.example.com/vaultdatum/server:0.4.0
 ```
@@ -279,6 +280,8 @@ metadata:
 spec:
   template:
     spec:
+      securityContext:
+        fsGroup: 4242 # example; use the deployment's runtime GID
       containers:
         - name: server
           env:
@@ -294,7 +297,7 @@ spec:
         - name: vault-access-token
           secret:
             secretName: vaultdatum-public-access-token
-            defaultMode: 0400
+            defaultMode: 0440
 ```
 
 The Secret value is one `vd1_`-prefixed 256-bit random token under the

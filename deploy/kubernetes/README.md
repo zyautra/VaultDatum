@@ -55,6 +55,8 @@ existing Kubernetes Secret at `/run/secrets/vaultdatum`, and set
 uses an `access-token` key whose value is one `vd1_`-prefixed 256-bit random
 token. Do not use `secretGenerator` from a checked-in plaintext file and do
 not put the Secret, hostname, or certificate material in this repository.
+Mount the Secret with `defaultMode: 0440` and set the Pod's `fsGroup` to its
+runtime GID so the non-root Server can read the root-owned Secret file.
 
 Expose only the `ClusterIP` Service through an HTTPS/WSS Gateway route whose
 certificate covers the exact public hostname. Do not route public traffic to
