@@ -51,8 +51,11 @@ The Obsidian plugin's settings tab is the **Sync overview**. It keeps a Server
 URL draft locally while the user types, then offers **Test connection** and
 **Save and start sync**. A reachable server with a different Vault identity is
 never adopted automatically; an unavailable URL may still be saved for an
-offline or VPN-reconnect workflow. A private-network hint is shown only while
-editing an `http://` URL.
+offline or VPN-reconnect workflow. The optional **Vault access token** is used
+only with an `https://` URL. A public server returns a distinct authentication
+state when the token is missing or rotated; pending work stays local and is not
+retried automatically until the connection settings change. A private-network
+hint is shown only while editing an `http://` URL.
 
 After the plugin has started, a new, modified, deleted, renamed, or moved file
 outside `.obsidian/` is captured as a durable operation before it is eligible
@@ -64,9 +67,9 @@ trigger that arrives during a cycle causes one follow-up cycle, so **Sync now**
 is an optional manual retry rather than a requirement for normal
 synchronization. Automatic synchronization can be paused without losing local
 changes. The status bar and settings overview report `Connect server`, `First
-sync`, `Syncing`, `Up to date`, `Pending`, `Offline`, `Conflict`, `Error`, or
-`Paused`, together with the last successful sync time and pending/conflict
-counts. MODIFY and DELETE retain
+sync`, `Syncing`, `Up to date`, `Pending`, `Offline`, `Authentication required`,
+`Conflict`, `Error`, or `Paused`, together with the last successful sync time
+and pending/conflict counts. MODIFY and DELETE retain
 the last replicated revision and content hash as their base condition. A
 same-directory path change is a RENAME; a change of parent directory is a MOVE.
 Both use a PRESENT source base and an UNKNOWN destination base, then commit both
@@ -114,10 +117,13 @@ before reading an oversized file, and the server independently rejects it with
 `413 CONTENT_TOO_LARGE`.
 
 The plugin also keeps a best-effort WebSocket connection to
-`/api/v1/notifications`. A `REVISION_ADVANCED` message contains only the
-latest revision and schedules an ordinary pull-based sync; it never carries
-Vault content or becomes a correctness dependency. Lost, duplicated, or
-delayed notifications therefore do not change synchronization results.
+`/api/v1/notifications`. A `public-token` server first issues a short-lived,
+single-use ticket through authenticated HTTP; the browser sends that ticket
+only as a WebSocket subprotocol, never in the URL. A `REVISION_ADVANCED`
+message contains only the latest revision and schedules an ordinary pull-based
+sync; it never carries Vault content or becomes a correctness dependency.
+Lost, duplicated, or delayed notifications therefore do not change
+synchronization results.
 
 An initial import never automatically restores a locally recreated tombstoned
 path. RENAME and MOVE changes are applied only when both source and destination
@@ -143,8 +149,9 @@ The overview offers **Check all files**, conflict review, and redacted
 diagnostic copying. **Reset sync tracking** is available only when no pending
 or recovery work remains; it preserves both Vaults and local notes while
 rebuilding this device's replica and cursor state through server-first
-bootstrap. **Reset connection settings** only removes the saved Server URL and
-pause preference; it does not clear sync tracking or local files.
+bootstrap. **Reset connection settings** only removes the saved Server URL,
+Vault access token, and pause preference; it does not clear sync tracking or
+local files.
 
 ## Update Client Protocol Types
 
@@ -216,8 +223,8 @@ cluster:
   -Dquarkus.package.jar.enabled=false \
   --no-daemon
 docker build -f server/src/main/docker/Dockerfile.native \
-  -t registry.example.com/vaultdatum/server:0.3.2 server
-docker push registry.example.com/vaultdatum/server:0.3.2
+  -t registry.example.com/vaultdatum/server:0.4.0 server
+docker push registry.example.com/vaultdatum/server:0.4.0
 ```
 
 Create an organization-specific overlay outside source control (or use a
@@ -237,7 +244,7 @@ resources:
 images:
   - name: vaultdatum-server
     newName: registry.example.com/vaultdatum/server
-    newTag: "0.3.2"
+    newTag: "0.4.0"
 ```
 
 The public base intentionally does not set a fixed runtime UID/GID. In a
@@ -254,11 +261,51 @@ kubectl apply -k /secure/deployment-config/vaultdatum
 kubectl -n vaultdatum rollout status deployment/vaultdatum-server
 ```
 
-VaultDatum does not currently authenticate HTTP clients. Keep its Service
-private, restrict it with the target environment's NetworkPolicy and firewall,
-and do not expose it through a public Gateway. Back up the entire `/data` PVC,
-including SQLite WAL files and the Vault, using a crash-consistent volume
-snapshot or a planned maintenance window.
+`private-network` is the default access profile. Keep its Service private and
+restrict it with the target environment's NetworkPolicy and firewall. A public
+deployment is supported only with `public-token`: a TLS-terminating Gateway,
+an HTTPS-only client URL, and a Vault token stored outside Git in a read-only
+Secret volume. The public Gateway must route only HTTPS/WSS traffic to the
+ClusterIP Service; do not publish port 8080, `/health`, the PVC, or SQLite.
+
+The private deployment overlay supplies the Secret and configuration without
+putting the token plaintext in source control:
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vaultdatum-server
+spec:
+  template:
+    spec:
+      containers:
+        - name: server
+          env:
+            - name: VAULTDATUM_ACCESS_PROFILE
+              value: public-token
+            - name: VAULTDATUM_AUTH_TOKEN_FILE
+              value: /run/secrets/vaultdatum/access-token
+          volumeMounts:
+            - name: vault-access-token
+              mountPath: /run/secrets/vaultdatum
+              readOnly: true
+      volumes:
+        - name: vault-access-token
+          secret:
+            secretName: vaultdatum-public-access-token
+            defaultMode: 0400
+```
+
+The Secret value is one `vd1_`-prefixed 256-bit random token under the
+`access-token` key. Give the public URL and token to each device through a
+private channel. To rotate it, replace the Secret, restart the one server Pod,
+then enter the new token on every client. The old token and all outstanding
+realtime tickets immediately stop working after restart. Follow the full
+public Gateway, TLS, NetworkPolicy, and logging requirements in the [security
+and deployment guide](https://github.com/zyautra/vaultdatum-docs/blob/main/09_security-and-deployment.md).
+Back up the entire `/data` PVC, including SQLite WAL files and the Vault, using
+a crash-consistent volume snapshot or a planned maintenance window.
 
 ## Layout
 
