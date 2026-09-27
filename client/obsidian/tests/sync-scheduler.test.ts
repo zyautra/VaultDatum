@@ -249,6 +249,31 @@ async function pausesOnlyAfterAnActiveCycleFinishes(): Promise<void> {
     scheduler.dispose();
 }
 
+async function stopsAutomaticRetryWhenAnAccessTokenIsRequired(): Promise<void> {
+    const statuses: SyncStatus[] = [];
+    let runs = 0;
+    const scheduler = new SyncScheduler({
+        run: async () => {
+            runs += 1;
+            return { ...successful, authenticationRequired: true };
+        },
+        readActivity: async () => ({
+            hasPending: true,
+            hasConflicts: false,
+        }),
+        isConfigured: () => true,
+        retryDelaysMs: [1],
+        onStatus: (status) => statuses.push(status),
+    });
+
+    await scheduler.request();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    assert.equal(runs, 1);
+    assert.equal(statuses.at(-1)?.kind, "AUTHENTICATION_REQUIRED");
+    scheduler.dispose();
+}
+
 class DeferredRun {
     public readonly promise: Promise<SyncSummary>;
 
@@ -281,3 +306,4 @@ await reportsPausedWithoutRunning();
 await reportsFirstSyncWhileBootstrapIsIncomplete();
 await publishesSyncProgressWithoutChangingThePrimaryState();
 await pausesOnlyAfterAnActiveCycleFinishes();
+await stopsAutomaticRetryWhenAnAccessTokenIsRequired();

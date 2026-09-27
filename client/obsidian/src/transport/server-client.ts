@@ -1,6 +1,7 @@
 import { requestUrl } from "obsidian";
 
 import { exceedsSyncContentLimit } from "../core/content-limits";
+import { ServerAuthenticationError, type RealtimeTicket } from "./access-token";
 import type { components } from "./generated/protocol";
 import type {
     PendingCreate,
@@ -154,11 +155,16 @@ export interface SyncTransport extends ContentTransport {
 }
 
 export class ServerClient implements SyncTransport {
+    public constructor(
+        private readonly vaultAccessToken: () => string = () => "",
+    ) {}
+
     public async readVault(
         serverUrl: string,
     ): Promise<ReadResult<RemoteVaultInfo>> {
         const response = await requestUrl({
             url: `${serverUrl}/api/v1/vault`,
+            headers: this.authorizationHeaders(serverUrl),
             throw: false,
         });
 
@@ -181,6 +187,7 @@ export class ServerClient implements SyncTransport {
         const response = await requestUrl({
             url: `${serverUrl}/api/v1/manifests`,
             method: "POST",
+            headers: this.authorizationHeaders(serverUrl),
             throw: false,
         });
 
@@ -201,6 +208,7 @@ export class ServerClient implements SyncTransport {
     ): Promise<ReadResult<RemoteManifest>> {
         const response = await requestUrl({
             url: `${serverUrl}/api/v1/manifests/${encodeURIComponent(manifestId)}`,
+            headers: this.authorizationHeaders(serverUrl),
             throw: false,
         });
 
@@ -222,6 +230,7 @@ export class ServerClient implements SyncTransport {
     ): Promise<ReadResult<RemoteChangePage>> {
         const response = await requestUrl({
             url: `${serverUrl}/api/v1/changes?after=${encodeURIComponent(after)}&limit=${encodeURIComponent(limit)}`,
+            headers: this.authorizationHeaders(serverUrl),
             throw: false,
         });
 
@@ -251,6 +260,7 @@ export class ServerClient implements SyncTransport {
         });
         const response = await requestUrl({
             url: `${serverUrl}/api/v1/content?${query.toString()}`,
+            headers: this.authorizationHeaders(serverUrl),
             throw: false,
         });
 
@@ -311,6 +321,7 @@ export class ServerClient implements SyncTransport {
             method: "POST",
             contentType: "application/json",
             body: JSON.stringify(metadata),
+            headers: this.authorizationHeaders(serverUrl),
             throw: false,
         });
 
@@ -429,6 +440,7 @@ export class ServerClient implements SyncTransport {
             method: "POST",
             contentType: "application/json",
             body: JSON.stringify(metadata),
+            headers: this.authorizationHeaders(serverUrl),
             throw: false,
         });
 
@@ -488,6 +500,7 @@ export class ServerClient implements SyncTransport {
             method: "POST",
             contentType: "application/json",
             body: JSON.stringify(metadata),
+            headers: this.authorizationHeaders(serverUrl),
             throw: false,
         });
 
@@ -514,6 +527,7 @@ export class ServerClient implements SyncTransport {
                 JSON.stringify(metadata),
                 content,
             ),
+            headers: this.authorizationHeaders(serverUrl),
             throw: false,
         });
 
@@ -522,6 +536,35 @@ export class ServerClient implements SyncTransport {
             response.text,
             pending.operationId,
         );
+    }
+
+    public async createRealtimeTicket(
+        serverUrl: string,
+    ): Promise<RealtimeTicket | undefined> {
+        const response = await requestUrl({
+            url: `${serverUrl}/api/v1/realtime-tickets`,
+            method: "POST",
+            headers: this.authorizationHeaders(serverUrl),
+            throw: false,
+        });
+        if (response.status === 201) {
+            const ticket = realtimeTicket(response.text);
+            if (ticket !== undefined) {
+                return ticket;
+            }
+            throw new Error("Server returned an invalid realtime ticket");
+        }
+        if (response.status === 401) {
+            throw new ServerAuthenticationError();
+        }
+        return undefined;
+    }
+
+    private authorizationHeaders(serverUrl: string): Record<string, string> {
+        const token = this.vaultAccessToken().trim();
+        return token.length === 0 || !isHttpsUrl(serverUrl)
+            ? {}
+            : { Authorization: `Bearer ${token}` };
     }
 }
 
@@ -588,6 +631,9 @@ function operationResponse(
     if (status === 503) {
         return { kind: "UNAVAILABLE" };
     }
+    if (status === 401) {
+        throw new ServerAuthenticationError();
+    }
 
     return {
         kind: "REJECTED",
@@ -619,6 +665,9 @@ async function multipartBody(
 function readFailure(status: number, content: string): ReadResult<never> {
     if (status === 503) {
         return { kind: "UNAVAILABLE" };
+    }
+    if (status === 401) {
+        throw new ServerAuthenticationError();
     }
 
     const code = errorCode(content);
@@ -707,6 +756,20 @@ function manifestCreated(content: string): RemoteManifestCreated | undefined {
         snapshotRevision: parsed.snapshotRevision,
         expiresAt: parsed.expiresAt,
     };
+}
+
+function realtimeTicket(content: string): RealtimeTicket | undefined {
+    const parsed = parseJson(content);
+    if (
+        !isRecord(parsed) ||
+        typeof parsed.ticket !== "string" ||
+        !/^[A-Za-z0-9_-]{22}$/.test(parsed.ticket) ||
+        !dateTime(parsed.expiresAt)
+    ) {
+        return undefined;
+    }
+
+    return { ticket: parsed.ticket, expiresAt: parsed.expiresAt };
 }
 
 function manifestSnapshot(content: string): RemoteManifest | undefined {
@@ -919,6 +982,14 @@ function parseJson(content: string): unknown {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
     return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isHttpsUrl(value: string): boolean {
+    try {
+        return new URL(value).protocol === "https:";
+    } catch {
+        return false;
+    }
 }
 
 function nonNegativeInteger(value: unknown): value is number {

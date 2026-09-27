@@ -1,9 +1,19 @@
 import assert from "node:assert/strict";
 
 import {
+    notificationProtocols,
     notificationUrl,
     revisionAdvancedNotification,
 } from "../src/sync/notification-channel";
+
+assert.deepEqual(notificationProtocols(undefined), undefined);
+assert.deepEqual(
+    notificationProtocols({
+        ticket: "QWERTYuiopASDFghjklz12",
+        expiresAt: "2026-09-27T01:00:00.000Z",
+    }),
+    ["vaultdatum.v1", "vaultdatum.ticket.QWERTYuiopASDFghjklz12"],
+);
 
 assert.deepEqual(
     revisionAdvancedNotification(

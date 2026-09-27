@@ -25,6 +25,7 @@ import {
     type SubmitOperationResult,
     type SyncTransport,
 } from "../transport/server-client";
+import { ServerAuthenticationError } from "../transport/access-token";
 import {
     RemoteApply,
     type LocalVault,
@@ -37,6 +38,7 @@ export interface SyncSummary {
     readonly oversized: number;
     readonly offline: boolean;
     readonly vaultMismatch: boolean;
+    readonly authenticationRequired?: boolean;
     readonly initialBootstrap?: boolean;
 }
 
@@ -631,6 +633,16 @@ export class CreateSync {
                     vaultMismatch: true,
                 };
             }
+            if (error instanceof ServerAuthenticationError) {
+                return {
+                    committed: 0,
+                    conflicted: 0,
+                    oversized,
+                    offline: false,
+                    vaultMismatch: false,
+                    authenticationRequired: true,
+                };
+            }
 
             console.warn("VaultDatum synchronization failed", error);
             return unavailable(0, 0, oversized);
@@ -1055,7 +1067,10 @@ export class CreateSync {
             let result: SubmitOperationResult;
             try {
                 result = await this.submit(serverUrl, pending);
-            } catch {
+            } catch (error: unknown) {
+                if (error instanceof ServerAuthenticationError) {
+                    throw error;
+                }
                 return { committed, conflicted, offline: true };
             }
 

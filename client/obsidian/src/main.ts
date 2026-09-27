@@ -43,22 +43,30 @@ import {
     type SyncActivity,
     type SyncStatus,
 } from "./sync/sync-scheduler";
+import { ServerAuthenticationError } from "./transport/access-token";
 import { ServerClient, type RemoteVaultInfo } from "./transport/server-client";
 
 interface VaultDatumSettings {
     serverUrl: string;
+    vaultAccessToken: string;
     databaseName: string;
     syncEnabled: boolean;
 }
 
 const DEFAULT_SETTINGS: VaultDatumSettings = {
     serverUrl: "",
+    vaultAccessToken: "",
     databaseName: "",
     syncEnabled: true,
 };
 
 type ConnectionCheck =
     | { readonly kind: "INVALID_URL"; readonly message: string }
+    | {
+          readonly kind: "AUTHENTICATION_REQUIRED";
+          readonly serverUrl: string;
+          readonly message: string;
+      }
     | {
           readonly kind: "UNAVAILABLE" | "UNEXPECTED";
           readonly serverUrl: string;
@@ -82,6 +90,7 @@ interface SyncOverview {
 
 type OverviewAction =
     | "CONNECT"
+    | "UPDATE_TOKEN"
     | "REVIEW_CONNECTION"
     | "RETRY"
     | "RESUME"
@@ -91,7 +100,9 @@ type OverviewAction =
 export default class VaultDatumPlugin extends Plugin {
     private syncSettings: VaultDatumSettings = { ...DEFAULT_SETTINGS };
 
-    private readonly serverClient = new ServerClient();
+    private readonly serverClient = new ServerClient(() =>
+        this.vaultAccessToken(),
+    );
 
     private store: ClientStore | undefined;
 
@@ -116,6 +127,10 @@ export default class VaultDatumPlugin extends Plugin {
     private observedConflictCount: number | undefined;
 
     private resetInProgress = false;
+
+    private connectionSettingsGeneration = 0;
+
+    private authenticationRequiredAtGeneration: number | undefined;
 
     public async onload(): Promise<void> {
         await this.loadSettings();
@@ -182,6 +197,11 @@ export default class VaultDatumPlugin extends Plugin {
         }
         this.notificationChannel = new NotificationChannel(
             () => this.serverUrl(),
+            () => this.vaultAccessToken().length > 0,
+            (serverUrl) => this.serverClient.createRealtimeTicket(serverUrl),
+            () => {
+                void this.syncNow(false);
+            },
             () => {
                 void this.syncNow(false);
             },
@@ -301,16 +321,29 @@ export default class VaultDatumPlugin extends Plugin {
         this.store?.close();
     }
 
-    public async updateServerUrl(serverUrl: string): Promise<ConnectionCheck> {
+    public async updateConnectionSettings(
+        serverUrl: string,
+        vaultAccessToken: string,
+    ): Promise<ConnectionCheck> {
         const normalized = normalizeServerUrl(serverUrl);
+        const normalizedToken = vaultAccessToken.trim();
         if (normalized === undefined) {
             return this.rememberConnectionCheck({
                 kind: "INVALID_URL",
                 message: "Enter a complete http:// or https:// server URL.",
             });
         }
-
-        const connection = await this.testServerConnection(normalized);
+        if (normalizedToken.length > 0 && !isHttpsUrl(normalized)) {
+            return this.rememberConnectionCheck({
+                kind: "INVALID_URL",
+                message:
+                    "A Vault access token can only be used with an https:// server URL.",
+            });
+        }
+        const connection = await this.testServerConnection(
+            normalized,
+            normalizedToken,
+        );
         if (
             connection.kind === "CONNECTED" &&
             !connection.matchesCurrentVault
@@ -319,6 +352,9 @@ export default class VaultDatumPlugin extends Plugin {
         }
 
         this.syncSettings.serverUrl = normalized;
+        this.syncSettings.vaultAccessToken = normalizedToken;
+        this.connectionSettingsGeneration += 1;
+        this.authenticationRequiredAtGeneration = undefined;
         await this.saveSettings();
         if (this.syncSettings.syncEnabled) {
             this.notificationChannel?.restart();
@@ -337,6 +373,9 @@ export default class VaultDatumPlugin extends Plugin {
         this.notificationChannel?.stop();
         this.lastConnectionCheck = undefined;
         this.syncSettings.serverUrl = DEFAULT_SETTINGS.serverUrl;
+        this.syncSettings.vaultAccessToken = DEFAULT_SETTINGS.vaultAccessToken;
+        this.connectionSettingsGeneration += 1;
+        this.authenticationRequiredAtGeneration = undefined;
         this.syncSettings.syncEnabled = DEFAULT_SETTINGS.syncEnabled;
         await this.saveSettings();
         this.syncScheduler?.refreshAvailability();
@@ -348,6 +387,10 @@ export default class VaultDatumPlugin extends Plugin {
 
     public serverUrl(): string {
         return normalizeServerUrl(this.syncSettings.serverUrl) ?? "";
+    }
+
+    public vaultAccessToken(): string {
+        return this.syncSettings.vaultAccessToken.trim();
     }
 
     public syncStatusDescription(): string {
@@ -368,6 +411,7 @@ export default class VaultDatumPlugin extends Plugin {
 
     public async testServerConnection(
         serverUrl: string,
+        vaultAccessToken = this.vaultAccessToken(),
     ): Promise<ConnectionCheck> {
         const normalized = normalizeServerUrl(serverUrl);
         if (normalized === undefined) {
@@ -376,9 +420,18 @@ export default class VaultDatumPlugin extends Plugin {
                 message: "Enter a complete http:// or https:// server URL.",
             });
         }
+        if (vaultAccessToken.trim().length > 0 && !isHttpsUrl(normalized)) {
+            return this.rememberConnectionCheck({
+                kind: "INVALID_URL",
+                message:
+                    "A Vault access token can only be used with an https:// server URL.",
+            });
+        }
 
         try {
-            const result = await this.serverClient.readVault(normalized);
+            const result = await new ServerClient(
+                () => vaultAccessToken,
+            ).readVault(normalized);
             if (result.kind !== "OK") {
                 return this.rememberConnectionCheck({
                     kind: "UNAVAILABLE",
@@ -397,7 +450,15 @@ export default class VaultDatumPlugin extends Plugin {
                     knownVaultId === undefined ||
                     knownVaultId === result.value.vaultId,
             });
-        } catch {
+        } catch (error: unknown) {
+            if (error instanceof ServerAuthenticationError) {
+                return this.rememberConnectionCheck({
+                    kind: "AUTHENTICATION_REQUIRED",
+                    serverUrl: normalized,
+                    message:
+                        "Authentication required. Enter this Vault's access token.",
+                });
+            }
             return this.rememberConnectionCheck({
                 kind: "UNEXPECTED",
                 serverUrl: normalized,
@@ -719,6 +780,13 @@ export default class VaultDatumPlugin extends Plugin {
         const scheduler = this.syncScheduler;
 
         if (scheduler === undefined) {
+            return;
+        }
+        if (
+            !showResult &&
+            this.authenticationRequiredAtGeneration ===
+                this.connectionSettingsGeneration
+        ) {
             return;
         }
 
@@ -1271,6 +1339,12 @@ export default class VaultDatumPlugin extends Plugin {
             );
             return;
         }
+        if (summary.authenticationRequired) {
+            new Notice(
+                "VaultDatum needs a valid Vault access token. Pending work remains on this device.",
+            );
+            return;
+        }
         if (summary.oversized > 0) {
             new Notice(
                 `VaultDatum skipped ${summary.oversized} file(s) larger than ${maximumContentSizeLabel()}.`,
@@ -1305,6 +1379,13 @@ export default class VaultDatumPlugin extends Plugin {
             this.observedConflictCount = conflictCount;
         }
         this.syncStatus = status;
+        if (status.kind === "AUTHENTICATION_REQUIRED") {
+            this.authenticationRequiredAtGeneration =
+                this.connectionSettingsGeneration;
+            this.notificationChannel?.stop();
+        } else {
+            this.authenticationRequiredAtGeneration = undefined;
+        }
         if (
             status.lastSuccessfulAt !== undefined &&
             status.lastSuccessfulAt !== this.lastPersistedSuccessfulAt
@@ -2532,6 +2613,12 @@ class VaultDatumSettingTab extends PluginSettingTab {
 
     private serverUrlInput: HTMLInputElement | undefined;
 
+    private vaultAccessTokenDraft = "";
+
+    private vaultAccessTokenInput: HTMLInputElement | undefined;
+
+    private vaultAccessTokenVisible = false;
+
     private serverTargetDescription: HTMLElement | undefined;
 
     private statusDescription: HTMLElement | undefined;
@@ -2552,6 +2639,8 @@ class VaultDatumSettingTab extends PluginSettingTab {
         containerEl.empty();
 
         this.serverUrlDraft = this.plugin.serverUrl();
+        this.vaultAccessTokenDraft = this.plugin.vaultAccessToken();
+        this.vaultAccessTokenVisible = false;
 
         containerEl.createEl("h2", { text: "Server connection" });
 
@@ -2564,10 +2653,41 @@ class VaultDatumSettingTab extends PluginSettingTab {
                     .setValue(this.serverUrlDraft)
                     .onChange((value) => {
                         this.serverUrlDraft = value;
+                        this.clearTokenForDifferentServerOrigin(value);
                         this.updateConnectionFeedback();
                         this.updateConnectionActions();
                     });
             });
+        new Setting(containerEl)
+            .setName("Vault access token")
+            .setDesc(
+                "Optional on a private network; required by a public Vault server.",
+            )
+            .addText((text) => {
+                this.vaultAccessTokenInput = text.inputEl;
+                text.inputEl.type = "password";
+                text.setPlaceholder("vd1_…")
+                    .setValue(this.vaultAccessTokenDraft)
+                    .onChange((value) => {
+                        this.vaultAccessTokenDraft = value;
+                        this.updateConnectionActions();
+                    });
+            })
+            .addButton((button) =>
+                button.setButtonText("Show").onClick(() => {
+                    this.vaultAccessTokenVisible =
+                        !this.vaultAccessTokenVisible;
+                    if (this.vaultAccessTokenInput !== undefined) {
+                        this.vaultAccessTokenInput.type = this
+                            .vaultAccessTokenVisible
+                            ? "text"
+                            : "password";
+                    }
+                    button.setButtonText(
+                        this.vaultAccessTokenVisible ? "Hide" : "Show",
+                    );
+                }),
+            );
         new Setting(containerEl)
             .setName("Test connection")
             .setDesc("Verify this URL without changing saved settings.")
@@ -2587,7 +2707,9 @@ class VaultDatumSettingTab extends PluginSettingTab {
             });
         new Setting(containerEl)
             .setName("Reset connection settings")
-            .setDesc("Clear the saved address; notes and sync tracking stay.")
+            .setDesc(
+                "Clear the saved address and token; notes and sync tracking stay.",
+            )
             .addButton((button) => {
                 this.resetConnectionButton = button.buttonEl;
                 button.setButtonText("Reset connection").onClick(() => {
@@ -2691,7 +2813,7 @@ class VaultDatumSettingTab extends PluginSettingTab {
         new Setting(containerEl)
             .setName("Diagnostic details")
             .setDesc(
-                "Copy version and sync-state details without note content or credentials.",
+                "Copy version and sync-state details without note content or access tokens.",
             )
             .addButton((button) =>
                 button.setButtonText("Copy diagnostic details").onClick(() => {
@@ -2730,6 +2852,7 @@ class VaultDatumSettingTab extends PluginSettingTab {
     private async testConnection(): Promise<void> {
         const result = await this.plugin.testServerConnection(
             this.serverUrlDraft,
+            this.vaultAccessTokenDraft.trim(),
         );
         this.updateConnectionFeedback(result);
     }
@@ -2739,7 +2862,9 @@ class VaultDatumSettingTab extends PluginSettingTab {
         if (
             this.savingServerUrl ||
             normalized === undefined ||
-            normalized === this.plugin.serverUrl()
+            (normalized === this.plugin.serverUrl() &&
+                this.vaultAccessTokenDraft.trim() ===
+                    this.plugin.vaultAccessToken())
         ) {
             return;
         }
@@ -2747,8 +2872,9 @@ class VaultDatumSettingTab extends PluginSettingTab {
         this.savingServerUrl = true;
         this.updateConnectionActions();
         try {
-            const result = await this.plugin.updateServerUrl(
+            const result = await this.plugin.updateConnectionSettings(
                 this.serverUrlDraft,
+                this.vaultAccessTokenDraft,
             );
             this.updateConnectionFeedback(result);
             if (result.kind === "CONNECTED" && result.matchesCurrentVault) {
@@ -2786,14 +2912,35 @@ class VaultDatumSettingTab extends PluginSettingTab {
         feedback.textContent = serverUrlHint(this.serverUrlDraft);
     }
 
+    private clearTokenForDifferentServerOrigin(serverUrl: string): void {
+        const savedOrigin = serverOrigin(this.plugin.serverUrl());
+        const draftOrigin = serverOrigin(serverUrl);
+        if (
+            this.vaultAccessTokenDraft.length === 0 ||
+            savedOrigin === undefined ||
+            draftOrigin === undefined ||
+            savedOrigin === draftOrigin
+        ) {
+            return;
+        }
+
+        this.vaultAccessTokenDraft = "";
+        if (this.vaultAccessTokenInput !== undefined) {
+            this.vaultAccessTokenInput.value = "";
+        }
+    }
+
     private updateConnectionActions(): void {
         const savedUrl = this.plugin.serverUrl();
         const draftUrl = normalizeServerUrl(this.serverUrlDraft);
+        const savedToken = this.plugin.vaultAccessToken();
+        const draftToken = this.vaultAccessTokenDraft.trim();
         const saveButton = this.saveConnectionButton;
         if (saveButton !== undefined) {
             const saved =
                 draftUrl !== undefined &&
                 draftUrl === savedUrl &&
+                draftToken === savedToken &&
                 savedUrl.length > 0;
             saveButton.disabled =
                 this.savingServerUrl || draftUrl === undefined || saved;
@@ -2814,6 +2961,9 @@ class VaultDatumSettingTab extends PluginSettingTab {
             case "CONNECT":
             case "REVIEW_CONNECTION":
                 this.serverUrlInput?.focus();
+                return;
+            case "UPDATE_TOKEN":
+                this.vaultAccessTokenInput?.focus();
                 return;
             case "RESUME":
                 await this.plugin.setSyncEnabled(true);
@@ -2970,7 +3120,7 @@ class ResetConnectionSettingsModal extends Modal {
     public onOpen(): void {
         this.setTitle("Reset connection settings?");
         this.contentEl.createEl("p", {
-            text: "This clears the saved Server URL and resumes automatic synchronization when you connect a server again.",
+            text: "This clears the saved Server URL and Vault access token. Notes and sync tracking stay unchanged.",
         });
         this.contentEl.createEl("p", {
             text: "Your local notes, sync tracking, and Server Vault will not be changed.",
@@ -3015,6 +3165,10 @@ function readSettings(value: unknown): VaultDatumSettings {
             typeof stored.serverUrl === "string"
                 ? stored.serverUrl
                 : DEFAULT_SETTINGS.serverUrl,
+        vaultAccessToken:
+            typeof stored.vaultAccessToken === "string"
+                ? stored.vaultAccessToken
+                : DEFAULT_SETTINGS.vaultAccessToken,
         databaseName:
             typeof stored.databaseName === "string"
                 ? stored.databaseName
@@ -3077,6 +3231,22 @@ function normalizeServerUrl(value: string): string | undefined {
     }
 }
 
+function isHttpsUrl(value: string): boolean {
+    try {
+        return new URL(value).protocol === "https:";
+    } catch {
+        return false;
+    }
+}
+
+function serverOrigin(value: string): string | undefined {
+    const normalized = normalizeServerUrl(value);
+    if (normalized === undefined) {
+        return undefined;
+    }
+    return new URL(normalized).origin;
+}
+
 function serverUrlHint(value: string): string {
     if (value.trim().length === 0) {
         return "Enter the complete URL of your VaultDatum server.";
@@ -3123,6 +3293,9 @@ function primaryOverviewAction(status: SyncStatus): OverviewAction | undefined {
     if (status.kind === "SETUP_REQUIRED") {
         return "CONNECT";
     }
+    if (status.kind === "AUTHENTICATION_REQUIRED") {
+        return "UPDATE_TOKEN";
+    }
     if (status.kind === "FIRST_SYNC" || status.kind === "SYNCING") {
         return undefined;
     }
@@ -3147,6 +3320,9 @@ function primaryOverviewActionLabel(action: OverviewAction): string {
     if (action === "CONNECT") {
         return "Connect server";
     }
+    if (action === "UPDATE_TOKEN") {
+        return "Update access token";
+    }
     if (action === "REVIEW_CONNECTION") {
         return "Review connection";
     }
@@ -3169,6 +3345,9 @@ function connectionOverviewDescription(overview: SyncOverview): string {
     if (overview.status.kind === "OFFLINE") {
         return "Saved — server unavailable. Retrying automatically.";
     }
+    if (overview.status.kind === "AUTHENTICATION_REQUIRED") {
+        return "Saved — update this Vault's access token to continue.";
+    }
     if (overview.status.kind === "ERROR") {
         return overview.status.summary?.vaultMismatch === true
             ? "Saved — this server belongs to a different Vault."
@@ -3190,6 +3369,9 @@ function connectionOverviewDescription(overview: SyncOverview): string {
     }
     if (overview.connectionCheck?.kind === "UNAVAILABLE") {
         return "Saved — server unavailable.";
+    }
+    if (overview.connectionCheck?.kind === "AUTHENTICATION_REQUIRED") {
+        return "Saved — Vault access token required.";
     }
     if (overview.connectionCheck?.kind === "UNEXPECTED") {
         return "Saved — server response needs attention.";
@@ -3222,6 +3404,9 @@ function describeSyncResult(status: SyncStatus): string {
     }
     if (status.kind === "OFFLINE") {
         return "The server was unavailable. Pending work remains on this device.";
+    }
+    if (status.kind === "AUTHENTICATION_REQUIRED") {
+        return "This Vault requires a valid access token. Pending work remains on this device.";
     }
     if (status.kind === "ERROR") {
         return status.summary?.vaultMismatch === true
@@ -3310,6 +3495,9 @@ function syncStatusLabel(status: SyncStatus): string {
     if (status.kind === "SETUP_REQUIRED") {
         return "VaultDatum: Connect server";
     }
+    if (status.kind === "AUTHENTICATION_REQUIRED") {
+        return "VaultDatum: Access token required";
+    }
     if (status.kind === "FIRST_SYNC") {
         return "VaultDatum: First sync";
     }
@@ -3353,6 +3541,9 @@ function syncStatusDescription(status: SyncStatus): string {
 
     if (status.kind === "SETUP_REQUIRED") {
         return "Connect a Server URL to start synchronization.";
+    }
+    if (status.kind === "AUTHENTICATION_REQUIRED") {
+        return "Enter a valid Vault access token. Pending work remains on this device and will not retry until the token changes.";
     }
     if (status.kind === "FIRST_SYNC") {
         return `First sync: ${syncPhaseDescription(status.phase, true)}`;

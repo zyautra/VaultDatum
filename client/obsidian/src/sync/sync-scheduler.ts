@@ -10,6 +10,7 @@ export type SyncStatusKind =
     | "UP_TO_DATE"
     | "PENDING"
     | "OFFLINE"
+    | "AUTHENTICATION_REQUIRED"
     | "CONFLICT"
     | "ERROR"
     | "PAUSED";
@@ -221,6 +222,15 @@ export class SyncScheduler {
     }
 
     private async publishSummary(summary: SyncSummary): Promise<void> {
+        if (summary.authenticationRequired) {
+            this.cancelRetry();
+            this.publish({
+                kind: "AUTHENTICATION_REQUIRED",
+                lastSuccessfulAt: this.lastSuccessfulAt,
+                summary,
+            });
+            return;
+        }
         if (summary.vaultMismatch) {
             this.publish({
                 kind: "ERROR",
@@ -264,7 +274,11 @@ export class SyncScheduler {
     }
 
     private async publishPausedSummary(summary: SyncSummary): Promise<void> {
-        if (!summary.offline && !summary.vaultMismatch) {
+        if (
+            !summary.offline &&
+            !summary.vaultMismatch &&
+            !summary.authenticationRequired
+        ) {
             this.retryAttempt = 0;
             this.lastSuccessfulAt = new Date().toISOString();
         }

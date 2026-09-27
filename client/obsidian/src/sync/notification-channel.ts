@@ -1,3 +1,8 @@
+import {
+    ServerAuthenticationError,
+    type RealtimeTicket,
+} from "../transport/access-token";
+
 export interface RevisionAdvancedNotification {
     readonly type: "REVISION_ADVANCED";
     readonly currentRevision: number;
@@ -12,6 +17,11 @@ export class NotificationChannel {
 
     public constructor(
         private readonly serverUrl: () => string,
+        private readonly shouldUseRealtimeTicket: () => boolean,
+        private readonly createRealtimeTicket: (
+            serverUrl: string,
+        ) => Promise<RealtimeTicket | undefined>,
+        private readonly authenticationRequired: () => void,
         private readonly triggerSync: () => void,
     ) {}
 
@@ -51,9 +61,34 @@ export class NotificationChannel {
             return;
         }
 
+        void this.open(url);
+    }
+
+    private async open(url: string): Promise<void> {
+        let ticket: RealtimeTicket | undefined;
+        if (this.shouldUseRealtimeTicket()) {
+            try {
+                ticket = await this.createRealtimeTicket(this.serverUrl());
+            } catch (error: unknown) {
+                if (error instanceof ServerAuthenticationError) {
+                    this.authenticationRequired();
+                } else {
+                    this.scheduleReconnect();
+                }
+                return;
+            }
+        }
+        if (this.stopped || this.socket !== undefined) {
+            return;
+        }
+
         let socket: WebSocket;
         try {
-            socket = new WebSocket(url);
+            const protocols = notificationProtocols(ticket);
+            socket =
+                protocols === undefined
+                    ? new WebSocket(url)
+                    : new WebSocket(url, protocols);
         } catch {
             this.scheduleReconnect();
             return;
@@ -85,6 +120,15 @@ export class NotificationChannel {
             this.connect();
         }, 5_000);
     }
+}
+
+export function notificationProtocols(
+    ticket: RealtimeTicket | undefined,
+): string[] | undefined {
+    if (ticket === undefined) {
+        return undefined;
+    }
+    return ["vaultdatum.v1", `vaultdatum.ticket.${ticket.ticket}`];
 }
 
 export function revisionAdvancedNotification(
