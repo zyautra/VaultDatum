@@ -1,4 +1,4 @@
-import { requestUrl } from "obsidian";
+import { requestUrl, type RequestUrlResponse } from "obsidian";
 
 import { exceedsSyncContentLimit } from "../core/content-limits";
 import { ServerAuthenticationError, type RealtimeTicket } from "./access-token";
@@ -162,11 +162,18 @@ export class ServerClient implements SyncTransport {
     public async readVault(
         serverUrl: string,
     ): Promise<ReadResult<RemoteVaultInfo>> {
-        const response = await requestUrl({
-            url: `${serverUrl}/api/v1/vault`,
-            headers: this.authorizationHeaders(serverUrl),
-            throw: false,
-        });
+        let response: RequestUrlResponse;
+        try {
+            response = await requestUrl({
+                url: `${serverUrl}/api/v1/vault`,
+                headers: this.authorizationHeaders(serverUrl),
+                throw: false,
+            });
+        } catch {
+            // requestUrl still throws for DNS, connection, and TLS failures
+            // even with throw: false; no HTTP response means unreachable.
+            return { kind: "UNAVAILABLE" };
+        }
 
         if (response.status === 200) {
             const vault = vaultInfo(response.text);
