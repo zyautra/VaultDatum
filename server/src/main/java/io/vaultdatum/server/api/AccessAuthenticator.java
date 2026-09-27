@@ -1,6 +1,7 @@
 package io.vaultdatum.server.api;
 
 import io.quarkus.runtime.Startup;
+import io.quarkus.runtime.annotations.RegisterForReflection;
 import io.quarkus.websockets.next.HttpUpgradeCheck;
 import io.smallrye.mutiny.Uni;
 import io.vaultdatum.server.config.AccessProfile;
@@ -203,6 +204,7 @@ public final class AccessAuthenticator implements HttpUpgradeCheck {
                 .build();
     }
 
+    @RegisterForReflection
     public record RealtimeTicket(String ticket, String expiresAt) {
     }
 }
