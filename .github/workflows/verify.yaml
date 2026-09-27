@@ -38,7 +38,14 @@ jobs:
           -Dquarkus.native.container-runtime=docker
           -Dquarkus.package.jar.enabled=false
           --no-daemon
-      - run: docker build -f server/src/main/docker/Dockerfile.native -t vaultdatum-server:native-test server
+      - name: Build native container
+        run: |
+          app_version="$(./gradlew properties --quiet --console=plain | sed -n 's/^version: //p')"
+          test -n "$app_version"
+          docker build \
+            -f server/src/main/docker/Dockerfile.native \
+            --build-arg APP_VERSION="$app_version" \
+            -t vaultdatum-server:native-test server
       - run: docker run --detach --rm --name vaultdatum-native-test -p 18080:8080 vaultdatum-server:native-test
       - run: curl --fail --retry 10 --retry-all-errors --retry-connrefused --retry-delay 1 http://127.0.0.1:18080/health
       - name: Verify a native mutation round trip and retry
