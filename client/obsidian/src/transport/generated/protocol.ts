@@ -366,9 +366,10 @@ export interface components {
             clientId: components["schemas"]["ClientId"];
         };
         /**
-         * @description Reserved for server-originated changes. The current server does not
-         *     record these actors; direct server Vault edits are never imported as
-         *     changes.
+         * @description Server-originated change. `SERVER_EXTERNAL` is recorded only for the
+         *     one-time initial import of files copied into a new server Vault;
+         *     direct server Vault edits are never imported as changes. `SYSTEM` is
+         *     reserved.
          */
         ServerChangeActor: {
             /** @enum {string} */
