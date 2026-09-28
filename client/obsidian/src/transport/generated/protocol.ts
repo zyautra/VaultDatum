@@ -365,6 +365,11 @@ export interface components {
             type: "CLIENT";
             clientId: components["schemas"]["ClientId"];
         };
+        /**
+         * @description Reserved for server-originated changes. The current server does not
+         *     record these actors; direct server Vault edits are never imported as
+         *     changes.
+         */
         ServerChangeActor: {
             /** @enum {string} */
             type: "SERVER_EXTERNAL" | "SYSTEM";

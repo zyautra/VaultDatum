@@ -756,6 +756,10 @@ components:
     ServerChangeActor:
       type: object
       additionalProperties: false
+      description: |
+        Reserved for server-originated changes. The current server does not
+        record these actors; direct server Vault edits are never imported as
+        changes.
       required:
         - type
       properties:
