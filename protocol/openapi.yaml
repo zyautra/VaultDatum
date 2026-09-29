@@ -17,6 +17,7 @@ tags:
   - name: System
   - name: Synchronization
   - name: Realtime
+  - name: History
 paths:
   /health:
     get:
@@ -237,6 +238,92 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "409":
           description: The current path state no longer matches the request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProtocolError"
+        "503":
+          $ref: "#/components/responses/ServerUnavailable"
+  /api/v1/history:
+    get:
+      tags:
+        - History
+      operationId: listFileHistory
+      summary: List the committed changes of one file, newest first
+      description: |
+        Used only to restore a single file. Synchronization never depends on
+        history. Entries whose content is no longer kept report
+        `contentAvailable: false`.
+      parameters:
+        - $ref: "#/components/parameters/SyncPathParameter"
+        - name: before
+          in: query
+          required: false
+          description: Return entries with a revision strictly lower than this one.
+          schema:
+            $ref: "#/components/schemas/CommittedRevision"
+        - name: limit
+          in: query
+          required: false
+          description: Maximum number of entries to return.
+          schema:
+            type: integer
+            format: int32
+            minimum: 1
+            maximum: 100
+            default: 50
+      responses:
+        "200":
+          description: File history page
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HistoryPage"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "503":
+          $ref: "#/components/responses/ServerUnavailable"
+  /api/v1/history/content:
+    get:
+      tags:
+        - History
+      operationId: downloadHistoryContent
+      summary: Download kept content by hash
+      description: |
+        Returns content kept in history or held by a current Vault file. The
+        server verifies the hash before returning bytes.
+      parameters:
+        - name: contentHash
+          in: query
+          required: true
+          description: Hash of the requested content.
+          schema:
+            $ref: "#/components/schemas/ContentHash"
+      responses:
+        "200":
+          description: Kept content
+          headers:
+            X-VaultDatum-Content-Hash:
+              description: Hash of the returned bytes
+              schema:
+                $ref: "#/components/schemas/ContentHash"
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: The content is no longer kept
           content:
             application/json:
               schema:
@@ -685,6 +772,58 @@ components:
           const: DELETED
         revision:
           $ref: "#/components/schemas/CommittedRevision"
+    HistoryPage:
+      type: object
+      additionalProperties: false
+      required:
+        - path
+        - entries
+        - hasMore
+      properties:
+        path:
+          $ref: "#/components/schemas/SyncPath"
+        entries:
+          type: array
+          items:
+            $ref: "#/components/schemas/HistoryEntry"
+        hasMore:
+          type: boolean
+    HistoryEntry:
+      type: object
+      additionalProperties: false
+      required:
+        - revision
+        - type
+        - committedAt
+        - actor
+        - state
+        - contentAvailable
+      properties:
+        revision:
+          $ref: "#/components/schemas/CommittedRevision"
+        type:
+          $ref: "#/components/schemas/ChangeType"
+        committedAt:
+          type: string
+          format: date-time
+        actor:
+          $ref: "#/components/schemas/ChangeActor"
+        state:
+          type: string
+          enum:
+            - PRESENT
+            - DELETED
+        contentHash:
+          $ref: "#/components/schemas/ContentHash"
+        size:
+          type: integer
+          format: int64
+          minimum: 0
+        contentAvailable:
+          type: boolean
+          description: True when the content of this entry can be downloaded.
+        previousPath:
+          $ref: "#/components/schemas/SyncPath"
     ChangePage:
       type: object
       additionalProperties: false
@@ -1272,6 +1411,7 @@ components:
             - MANIFEST_EXPIRED
             - MANIFEST_NOT_FOUND
             - RECOVERY_REQUIRED
+            - CONTENT_NOT_RETAINED
             - SERVER_NOT_READY
             - UNAUTHORIZED
             - FORBIDDEN

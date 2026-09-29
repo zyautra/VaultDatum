@@ -26,10 +26,17 @@ public final class DeleteCoordinator {
 
     private final VaultDriftGuard driftGuard;
 
-    public DeleteCoordinator(DataDirectories dataDirectories, DSLContext dsl, VaultDriftGuard driftGuard) {
+    private final ContentHistory contentHistory;
+
+    public DeleteCoordinator(
+            DataDirectories dataDirectories,
+            DSLContext dsl,
+            VaultDriftGuard driftGuard,
+            ContentHistory contentHistory) {
         this.dataDirectories = dataDirectories;
         this.dsl = dsl;
         this.driftGuard = driftGuard;
+        this.contentHistory = contentHistory;
     }
 
     public OperationResult commit(DeleteOperation operation) {
@@ -49,7 +56,7 @@ public final class DeleteCoordinator {
         prepare(operation);
         apply(operation);
         OperationResult result = finalize(operation);
-        discardRecovery(operation);
+        contentHistory.retain(recoveryPath(operation), operation.base().contentHash());
         return result;
     }
 
@@ -89,7 +96,7 @@ public final class DeleteCoordinator {
                     operation.operationId(), requestDigest(operation), record.get(operations.REQUEST_DIGEST));
             apply(operation);
             finalize(operation);
-            discardRecovery(operation);
+            contentHistory.retain(recoveryPath(operation), operation.base().contentHash());
         }
     }
 
@@ -194,14 +201,5 @@ public final class DeleteCoordinator {
 
     private static String recoveryReference(DeleteOperation operation) {
         return "delete-" + operation.operationId() + ".bak";
-    }
-
-    private void discardRecovery(DeleteOperation operation) {
-        try {
-            Files.deleteIfExists(recoveryPath(operation));
-            VaultFiles.forceDirectory(dataDirectories.recovery());
-        } catch (IOException ignored) {
-            // A retained backup is safe and can be collected after the committed state is durable.
-        }
     }
 }

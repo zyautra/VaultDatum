@@ -23,6 +23,7 @@ public final class DataDirectories {
         createDirectory(sqliteTemporary());
         createDirectory(staging());
         createDirectory(recovery());
+        createDirectory(history());
     }
 
     public Path root() {
@@ -47,6 +48,10 @@ public final class DataDirectories {
 
     public Path recovery() {
         return root.resolve("recovery");
+    }
+
+    public Path history() {
+        return root.resolve("history");
     }
 
     /**

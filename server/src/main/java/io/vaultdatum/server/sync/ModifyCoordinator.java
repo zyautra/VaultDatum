@@ -26,10 +26,17 @@ public final class ModifyCoordinator {
 
     private final VaultDriftGuard driftGuard;
 
-    public ModifyCoordinator(DataDirectories dataDirectories, DSLContext dsl, VaultDriftGuard driftGuard) {
+    private final ContentHistory contentHistory;
+
+    public ModifyCoordinator(
+            DataDirectories dataDirectories,
+            DSLContext dsl,
+            VaultDriftGuard driftGuard,
+            ContentHistory contentHistory) {
         this.dataDirectories = dataDirectories;
         this.dsl = dsl;
         this.driftGuard = driftGuard;
+        this.contentHistory = contentHistory;
     }
 
     public OperationResult commit(ModifyOperation operation, Path stagedContent) {
@@ -51,7 +58,7 @@ public final class ModifyCoordinator {
         prepare(operation, staged);
         apply(operation, staged);
         OperationResult result = finalize(operation);
-        discardRecovery(operation);
+        contentHistory.retain(recoveryPath(operation), operation.base().contentHash());
         return result;
     }
 
@@ -96,7 +103,7 @@ public final class ModifyCoordinator {
                     operation.operationId(), requestDigest(operation), record.get(operations.REQUEST_DIGEST));
             apply(operation, dataDirectories.stagedFile(record.get(operations.STAGING_REFERENCE)));
             finalize(operation);
-            discardRecovery(operation);
+            contentHistory.retain(recoveryPath(operation), operation.base().contentHash());
         }
     }
 
@@ -219,14 +226,5 @@ public final class ModifyCoordinator {
 
     private static String recoveryReference(ModifyOperation operation) {
         return "modify-" + operation.operationId() + ".bak";
-    }
-
-    private void discardRecovery(ModifyOperation operation) {
-        try {
-            Files.deleteIfExists(recoveryPath(operation));
-            VaultFiles.forceDirectory(dataDirectories.recovery());
-        } catch (IOException ignored) {
-            // A retained backup is safe and can be collected after the committed state is durable.
-        }
     }
 }

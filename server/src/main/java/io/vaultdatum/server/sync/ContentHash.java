@@ -54,6 +54,10 @@ public final class ContentHash {
         return new HashedContent(encode(digest.digest()), size);
     }
 
+    public static boolean isValid(String value) {
+        return value != null && value.matches("sha256:[0-9a-f]{64}");
+    }
+
     public static String calculateUtf8(String value) {
         return calculate(value.getBytes(StandardCharsets.UTF_8));
     }

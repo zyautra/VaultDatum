@@ -174,6 +174,49 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/history": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List the committed changes of one file, newest first
+         * @description Used only to restore a single file. Synchronization never depends on
+         *     history. Entries whose content is no longer kept report
+         *     `contentAvailable: false`.
+         */
+        get: operations["listFileHistory"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/history/content": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Download kept content by hash
+         * @description Returns content kept in history or held by a current Vault file. The
+         *     server verifies the hash before returning bytes.
+         */
+        get: operations["downloadHistoryContent"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/operations": {
         parameters: {
             query?: never;
@@ -339,6 +382,26 @@ export interface components {
             /** @constant */
             state: "DELETED";
             revision: components["schemas"]["CommittedRevision"];
+        };
+        HistoryPage: {
+            path: components["schemas"]["SyncPath"];
+            entries: components["schemas"]["HistoryEntry"][];
+            hasMore: boolean;
+        };
+        HistoryEntry: {
+            revision: components["schemas"]["CommittedRevision"];
+            type: components["schemas"]["ChangeType"];
+            /** Format: date-time */
+            committedAt: string;
+            actor: components["schemas"]["ChangeActor"];
+            /** @enum {string} */
+            state: "PRESENT" | "DELETED";
+            contentHash?: components["schemas"]["ContentHash"];
+            /** Format: int64 */
+            size?: number;
+            /** @description True when the content of this entry can be downloaded. */
+            contentAvailable: boolean;
+            previousPath?: components["schemas"]["SyncPath"];
         };
         ChangePage: {
             vaultId: components["schemas"]["VaultId"];
@@ -581,6 +644,7 @@ export interface components {
                 | "MANIFEST_EXPIRED"
                 | "MANIFEST_NOT_FOUND"
                 | "RECOVERY_REQUIRED"
+                | "CONTENT_NOT_RETAINED"
                 | "SERVER_NOT_READY"
                 | "UNAUTHORIZED"
                 | "FORBIDDEN";
@@ -899,6 +963,75 @@ export interface operations {
             403: components["responses"]["Forbidden"];
             /** @description The current path state no longer matches the request */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProtocolError"];
+                };
+            };
+            503: components["responses"]["ServerUnavailable"];
+        };
+    };
+    listFileHistory: {
+        parameters: {
+            query: {
+                /** @description Vault-root-relative logical path using `/` separators. */
+                path: components["parameters"]["SyncPathParameter"];
+                /** @description Return entries with a revision strictly lower than this one. */
+                before?: components["schemas"]["CommittedRevision"];
+                /** @description Maximum number of entries to return. */
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description File history page */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HistoryPage"];
+                };
+            };
+            400: components["responses"]["InvalidRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            503: components["responses"]["ServerUnavailable"];
+        };
+    };
+    downloadHistoryContent: {
+        parameters: {
+            query: {
+                /** @description Hash of the requested content. */
+                contentHash: components["schemas"]["ContentHash"];
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Kept content */
+            200: {
+                headers: {
+                    /** @description Hash of the returned bytes */
+                    "X-VaultDatum-Content-Hash"?: components["schemas"]["ContentHash"];
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/octet-stream": string;
+                };
+            };
+            400: components["responses"]["InvalidRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            /** @description The content is no longer kept */
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };
