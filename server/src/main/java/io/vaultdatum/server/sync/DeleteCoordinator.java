@@ -1,12 +1,9 @@
 package io.vaultdatum.server.sync;
 
-import static io.vaultdatum.server.jooq.Tables.CHANGE_EFFECT;
-import static io.vaultdatum.server.jooq.Tables.CHANGE_JOURNAL;
 import static io.vaultdatum.server.jooq.Tables.OPERATION_BASE_CONDITION;
 import static io.vaultdatum.server.jooq.Tables.OPERATION_DELETE;
 import static io.vaultdatum.server.jooq.Tables.OPERATIONS;
 import static io.vaultdatum.server.jooq.Tables.PATH_STATE;
-import static io.vaultdatum.server.jooq.Tables.VAULT_METADATA;
 
 import io.vaultdatum.server.config.DataDirectories;
 import io.vaultdatum.server.jooq.tables.OperationDelete;
@@ -16,12 +13,9 @@ import org.jooq.DSLContext;
 import org.jooq.impl.DSL;
 
 import java.io.IOException;
-import java.nio.channels.FileChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
-import java.nio.file.StandardOpenOption;
-import java.time.Instant;
 
 @ApplicationScoped
 public final class DeleteCoordinator {
@@ -45,7 +39,7 @@ public final class DeleteCoordinator {
     }
 
     private OperationResult commitLocked(DeleteOperation operation) {
-        OperationResult replayed = existingResult(operation);
+        OperationResult replayed = OperationRecords.replay(dsl, operation.operationId(), requestDigest(operation));
 
         if (replayed != null) {
             return replayed;
@@ -91,28 +85,12 @@ public final class DeleteCoordinator {
                     new PresentBase(
                             record.get(OPERATION_BASE_CONDITION.EXPECTED_REVISION),
                             record.get(OPERATION_BASE_CONDITION.EXPECTED_HASH)));
-            requireMatchingDigest(operation, record.get(operations.REQUEST_DIGEST));
+            OperationRecords.requireMatchingDigest(
+                    operation.operationId(), requestDigest(operation), record.get(operations.REQUEST_DIGEST));
             apply(operation);
             finalize(operation);
             discardRecovery(operation);
         }
-    }
-
-    private OperationResult existingResult(DeleteOperation operation) {
-        var record = dsl.select(OPERATIONS.STATUS, OPERATIONS.RESULT_REVISION, OPERATIONS.REQUEST_DIGEST)
-                .from(OPERATIONS)
-                .where(OPERATIONS.OPERATION_ID.eq(operation.operationId()))
-                .fetchOne();
-
-        if (record == null) {
-            return null;
-        }
-        requireMatchingDigest(operation, record.get(OPERATIONS.REQUEST_DIGEST));
-        if (!"COMMITTED".equals(record.get(OPERATIONS.STATUS))) {
-            throw new RecoveryRequiredException(operation.operationId());
-        }
-
-        return new OperationResult(operation.operationId(), record.get(OPERATIONS.RESULT_REVISION), true);
     }
 
     private void prepare(DeleteOperation operation) {
@@ -134,40 +112,22 @@ public final class DeleteCoordinator {
                 throw new BaseStateMismatchException("The delete base does not match the authoritative Vault");
             }
 
-            transaction.insertInto(OPERATIONS)
-                    .columns(
-                            OPERATIONS.OPERATION_ID,
-                            OPERATIONS.ACTOR_CLIENT_ID,
-                            OPERATIONS.OPERATION_TYPE,
-                            OPERATIONS.REQUEST_DIGEST,
-                            OPERATIONS.STATUS,
-                            OPERATIONS.RECOVERY_REFERENCE,
-                            OPERATIONS.CREATED_AT)
-                    .values(
-                            operation.operationId(),
-                            operation.clientId(),
-                            "DELETE",
-                            requestDigest(operation),
-                            "PREPARED",
-                            recoveryReference(operation),
-                            Instant.now().toString())
-                    .execute();
-            transaction.insertInto(OPERATION_BASE_CONDITION)
-                    .columns(
-                            OPERATION_BASE_CONDITION.OPERATION_ID,
-                            OPERATION_BASE_CONDITION.ORDINAL,
-                            OPERATION_BASE_CONDITION.PATH,
-                            OPERATION_BASE_CONDITION.EXPECTED_STATE,
-                            OPERATION_BASE_CONDITION.EXPECTED_REVISION,
-                            OPERATION_BASE_CONDITION.EXPECTED_HASH)
-                    .values(
-                            operation.operationId(),
-                            0,
-                            operation.path().value(),
-                            "PRESENT",
-                            operation.base().revision(),
-                            operation.base().contentHash())
-                    .execute();
+            OperationRecords.insertPrepared(
+                    transaction,
+                    operation.operationId(),
+                    operation.clientId(),
+                    "DELETE",
+                    requestDigest(operation),
+                    null,
+                    recoveryReference(operation));
+            OperationRecords.insertBase(
+                    transaction,
+                    operation.operationId(),
+                    0,
+                    operation.path().value(),
+                    "PRESENT",
+                    operation.base().revision(),
+                    operation.base().contentHash());
             transaction.insertInto(OPERATION_DELETE)
                     .columns(OPERATION_DELETE.OPERATION_ID, OPERATION_DELETE.PATH)
                     .values(operation.operationId(), operation.path().value())
@@ -179,17 +139,17 @@ public final class DeleteCoordinator {
         Path target = operation.path().resolveUnder(dataDirectories.vault());
         Path recovery = recoveryPath(operation);
 
-        if (matches(operation.base().contentHash(), target)) {
+        if (VaultFiles.hasContent(target, operation.base().contentHash())) {
             try {
                 Files.move(target, recovery, StandardCopyOption.ATOMIC_MOVE);
-                forceVaultDirectories(target.getParent());
-                forceDirectory(recovery.getParent());
+                VaultFiles.forceDirectoriesUpTo(target.getParent(), dataDirectories.vault());
+                VaultFiles.forceDirectory(recovery.getParent());
                 return;
             } catch (IOException exception) {
                 throw new RecoveryRequiredException(operation.operationId(), exception);
             }
         }
-        if (!matches(operation.base().contentHash(), recovery) || Files.exists(target)) {
+        if (!VaultFiles.hasContent(recovery, operation.base().contentHash()) || Files.exists(target)) {
             throw new RecoveryRequiredException(operation.operationId());
         }
     }
@@ -197,7 +157,7 @@ public final class DeleteCoordinator {
     private OperationResult finalize(DeleteOperation operation) {
         return dsl.transactionResult(configuration -> {
             DSLContext transaction = DSL.using(configuration);
-            long revision = nextRevision(transaction);
+            long revision = ChangeJournal.nextRevision(transaction);
             int updatedPath = transaction.update(PATH_STATE)
                     .set(PATH_STATE.STATE, "DELETED")
                     .set(PATH_STATE.LATEST_REVISION, revision)
@@ -210,55 +170,12 @@ public final class DeleteCoordinator {
             if (updatedPath != 1) {
                 throw new IllegalStateException("Delete path state was lost before finalization");
             }
-            transaction.insertInto(CHANGE_JOURNAL)
-                    .columns(
-                            CHANGE_JOURNAL.REVISION,
-                            CHANGE_JOURNAL.OPERATION_ID,
-                            CHANGE_JOURNAL.CHANGE_TYPE,
-                            CHANGE_JOURNAL.ACTOR_TYPE,
-                            CHANGE_JOURNAL.ACTOR_CLIENT_ID,
-                            CHANGE_JOURNAL.COMMITTED_AT)
-                    .values(revision, operation.operationId(), "DELETE", "CLIENT", operation.clientId(), Instant.now().toString())
-                    .execute();
-            transaction.insertInto(CHANGE_EFFECT)
-                    .columns(
-                            CHANGE_EFFECT.REVISION,
-                            CHANGE_EFFECT.ORDINAL,
-                            CHANGE_EFFECT.PATH,
-                            CHANGE_EFFECT.ENTRY_TYPE,
-                            CHANGE_EFFECT.STATE)
-                    .values(revision, 0, operation.path().value(), "FILE", "DELETED")
-                    .execute();
-            int completed = transaction.update(OPERATIONS)
-                    .set(OPERATIONS.STATUS, "COMMITTED")
-                    .set(OPERATIONS.RESULT_REVISION, revision)
-                    .set(OPERATIONS.COMPLETED_AT, Instant.now().toString())
-                    .where(OPERATIONS.OPERATION_ID.eq(operation.operationId()).and(OPERATIONS.STATUS.eq("PREPARED")))
-                    .execute();
-
-            if (completed != 1) {
-                throw new IllegalStateException("Prepared delete could not be finalized: " + operation.operationId());
-            }
+            ChangeJournal.appendClientChange(
+                    transaction, revision, operation.operationId(), "DELETE", operation.clientId(), null, null);
+            ChangeJournal.appendDeleted(transaction, revision, 0, operation.path().value(), "FILE");
+            OperationRecords.markCommitted(transaction, operation.operationId(), revision);
             return new OperationResult(operation.operationId(), revision, false);
         });
-    }
-
-    private long nextRevision(DSLContext transaction) {
-        long revision = transaction.select(VAULT_METADATA.CURRENT_REVISION)
-                .from(VAULT_METADATA)
-                .where(VAULT_METADATA.ID.eq(1))
-                .fetchSingle(VAULT_METADATA.CURRENT_REVISION) + 1;
-        transaction.update(VAULT_METADATA)
-                .set(VAULT_METADATA.CURRENT_REVISION, revision)
-                .where(VAULT_METADATA.ID.eq(1))
-                .execute();
-        return revision;
-    }
-
-    private void requireMatchingDigest(DeleteOperation operation, String storedDigest) {
-        if (!requestDigest(operation).equals(storedDigest)) {
-            throw new OperationIdReuseException(operation.operationId());
-        }
     }
 
     private static String requestDigest(DeleteOperation operation) {
@@ -282,41 +199,9 @@ public final class DeleteCoordinator {
     private void discardRecovery(DeleteOperation operation) {
         try {
             Files.deleteIfExists(recoveryPath(operation));
-            forceDirectory(dataDirectories.recovery());
+            VaultFiles.forceDirectory(dataDirectories.recovery());
         } catch (IOException ignored) {
             // A retained backup is safe and can be collected after the committed state is durable.
-        }
-    }
-
-    private static boolean matches(String expectedHash, Path file) {
-        if (!Files.isRegularFile(file)) {
-            return false;
-        }
-
-        try {
-            return expectedHash.equals(ContentHash.calculate(file).value());
-        } catch (IOException exception) {
-            throw new IllegalStateException("Could not hash an authoritative file", exception);
-        }
-    }
-
-    private static void forceDirectory(Path directory) {
-        try (FileChannel channel = FileChannel.open(directory, StandardOpenOption.READ)) {
-            channel.force(true);
-        } catch (IOException exception) {
-            throw new IllegalStateException("Could not durably update directory: " + directory, exception);
-        }
-    }
-
-    private void forceVaultDirectories(Path directory) {
-        Path current = directory;
-
-        while (true) {
-            forceDirectory(current);
-            if (current.equals(dataDirectories.vault())) {
-                return;
-            }
-            current = current.getParent();
         }
     }
 }

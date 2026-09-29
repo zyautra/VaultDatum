@@ -1,12 +1,9 @@
 package io.vaultdatum.server.sync;
 
-import static io.vaultdatum.server.jooq.Tables.CHANGE_EFFECT;
-import static io.vaultdatum.server.jooq.Tables.CHANGE_JOURNAL;
 import static io.vaultdatum.server.jooq.Tables.OPERATION_BASE_CONDITION;
 import static io.vaultdatum.server.jooq.Tables.OPERATION_MODIFY;
 import static io.vaultdatum.server.jooq.Tables.OPERATIONS;
 import static io.vaultdatum.server.jooq.Tables.PATH_STATE;
-import static io.vaultdatum.server.jooq.Tables.VAULT_METADATA;
 
 import io.vaultdatum.server.config.DataDirectories;
 import io.vaultdatum.server.jooq.tables.OperationModify;
@@ -16,12 +13,9 @@ import org.jooq.DSLContext;
 import org.jooq.impl.DSL;
 
 import java.io.IOException;
-import java.nio.channels.FileChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
-import java.nio.file.StandardOpenOption;
-import java.time.Instant;
 
 @ApplicationScoped
 public final class ModifyCoordinator {
@@ -45,14 +39,14 @@ public final class ModifyCoordinator {
     }
 
     private OperationResult commitLocked(ModifyOperation operation, Path stagedContent) {
-        OperationResult replayed = existingResult(operation);
+        OperationResult replayed = OperationRecords.replay(dsl, operation.operationId(), requestDigest(operation));
 
         if (replayed != null) {
             return replayed;
         }
 
-        Path staged = requireStagedContent(stagedContent);
-        forceDirectory(staged.getParent());
+        Path staged = dataDirectories.requireStagedFile(stagedContent);
+        VaultFiles.forceDirectory(staged.getParent());
         driftGuard.requireRecordedFile(operation.path());
         prepare(operation, staged);
         apply(operation, staged);
@@ -98,28 +92,12 @@ public final class ModifyCoordinator {
                             record.get(OPERATION_BASE_CONDITION.EXPECTED_HASH)),
                     record.get(modifies.CONTENT_HASH),
                     record.get(modifies.SIZE));
-            requireMatchingDigest(operation, record.get(operations.REQUEST_DIGEST));
-            apply(operation, stagingPath(record.get(operations.STAGING_REFERENCE)));
+            OperationRecords.requireMatchingDigest(
+                    operation.operationId(), requestDigest(operation), record.get(operations.REQUEST_DIGEST));
+            apply(operation, dataDirectories.stagedFile(record.get(operations.STAGING_REFERENCE)));
             finalize(operation);
             discardRecovery(operation);
         }
-    }
-
-    private OperationResult existingResult(ModifyOperation operation) {
-        var record = dsl.select(OPERATIONS.STATUS, OPERATIONS.RESULT_REVISION, OPERATIONS.REQUEST_DIGEST)
-                .from(OPERATIONS)
-                .where(OPERATIONS.OPERATION_ID.eq(operation.operationId()))
-                .fetchOne();
-
-        if (record == null) {
-            return null;
-        }
-        requireMatchingDigest(operation, record.get(OPERATIONS.REQUEST_DIGEST));
-        if (!"COMMITTED".equals(record.get(OPERATIONS.STATUS))) {
-            throw new RecoveryRequiredException(operation.operationId());
-        }
-
-        return new OperationResult(operation.operationId(), record.get(OPERATIONS.RESULT_REVISION), true);
     }
 
     private void prepare(ModifyOperation operation, Path stagedContent) {
@@ -141,42 +119,22 @@ public final class ModifyCoordinator {
                 throw new BaseStateMismatchException("The modify base does not match the authoritative Vault");
             }
 
-            transaction.insertInto(OPERATIONS)
-                    .columns(
-                            OPERATIONS.OPERATION_ID,
-                            OPERATIONS.ACTOR_CLIENT_ID,
-                            OPERATIONS.OPERATION_TYPE,
-                            OPERATIONS.REQUEST_DIGEST,
-                            OPERATIONS.STATUS,
-                            OPERATIONS.STAGING_REFERENCE,
-                            OPERATIONS.RECOVERY_REFERENCE,
-                            OPERATIONS.CREATED_AT)
-                    .values(
-                            operation.operationId(),
-                            operation.clientId(),
-                            "MODIFY",
-                            requestDigest(operation),
-                            "PREPARED",
-                            stagedContent.getFileName().toString(),
-                            recoveryReference(operation),
-                            Instant.now().toString())
-                    .execute();
-            transaction.insertInto(OPERATION_BASE_CONDITION)
-                    .columns(
-                            OPERATION_BASE_CONDITION.OPERATION_ID,
-                            OPERATION_BASE_CONDITION.ORDINAL,
-                            OPERATION_BASE_CONDITION.PATH,
-                            OPERATION_BASE_CONDITION.EXPECTED_STATE,
-                            OPERATION_BASE_CONDITION.EXPECTED_REVISION,
-                            OPERATION_BASE_CONDITION.EXPECTED_HASH)
-                    .values(
-                            operation.operationId(),
-                            0,
-                            operation.path().value(),
-                            "PRESENT",
-                            operation.base().revision(),
-                            operation.base().contentHash())
-                    .execute();
+            OperationRecords.insertPrepared(
+                    transaction,
+                    operation.operationId(),
+                    operation.clientId(),
+                    "MODIFY",
+                    requestDigest(operation),
+                    stagedContent.getFileName().toString(),
+                    recoveryReference(operation));
+            OperationRecords.insertBase(
+                    transaction,
+                    operation.operationId(),
+                    0,
+                    operation.path().value(),
+                    "PRESENT",
+                    operation.base().revision(),
+                    operation.base().contentHash());
             transaction.insertInto(OPERATION_MODIFY)
                     .columns(
                             OPERATION_MODIFY.OPERATION_ID,
@@ -197,23 +155,23 @@ public final class ModifyCoordinator {
         Path recovery = recoveryPath(operation);
 
         try {
-            if (matches(operation.contentHash(), operation.size(), target)) {
+            if (VaultFiles.hasContent(target, operation.contentHash(), operation.size())) {
                 return;
             }
             if (!Files.isRegularFile(stagedContent)) {
                 throw new RecoveryRequiredException(operation.operationId());
             }
-            if (matches(operation.base().contentHash(), -1, target)) {
+            if (VaultFiles.hasContent(target, operation.base().contentHash())) {
                 Files.move(target, recovery, StandardCopyOption.ATOMIC_MOVE);
-                forceVaultDirectories(target.getParent());
-                forceDirectory(recovery.getParent());
-            } else if (!matches(operation.base().contentHash(), -1, recovery)) {
+                VaultFiles.forceDirectoriesUpTo(target.getParent(), dataDirectories.vault());
+                VaultFiles.forceDirectory(recovery.getParent());
+            } else if (!VaultFiles.hasContent(recovery, operation.base().contentHash())) {
                 throw new RecoveryRequiredException(operation.operationId());
             }
 
             Files.move(stagedContent, target, StandardCopyOption.ATOMIC_MOVE);
-            forceVaultDirectories(target.getParent());
-            forceDirectory(stagedContent.getParent());
+            VaultFiles.forceDirectoriesUpTo(target.getParent(), dataDirectories.vault());
+            VaultFiles.forceDirectory(stagedContent.getParent());
         } catch (IOException exception) {
             throw new RecoveryRequiredException(operation.operationId(), exception);
         }
@@ -222,7 +180,7 @@ public final class ModifyCoordinator {
     private OperationResult finalize(ModifyOperation operation) {
         return dsl.transactionResult(configuration -> {
             DSLContext transaction = DSL.using(configuration);
-            long revision = nextRevision(transaction);
+            long revision = ChangeJournal.nextRevision(transaction);
             int updatedPath = transaction.update(PATH_STATE)
                     .set(PATH_STATE.STATE, "PRESENT")
                     .set(PATH_STATE.LATEST_REVISION, revision)
@@ -234,72 +192,13 @@ public final class ModifyCoordinator {
             if (updatedPath != 1) {
                 throw new IllegalStateException("Modify path state was lost before finalization");
             }
-            recordChange(transaction, operation, revision);
-            completeOperation(transaction, operation.operationId(), revision);
+            ChangeJournal.appendClientChange(
+                    transaction, revision, operation.operationId(), "MODIFY", operation.clientId(), null, null);
+            ChangeJournal.appendPresentFile(
+                    transaction, revision, 0, operation.path().value(), operation.contentHash(), operation.size());
+            OperationRecords.markCommitted(transaction, operation.operationId(), revision);
             return new OperationResult(operation.operationId(), revision, false);
         });
-    }
-
-    private long nextRevision(DSLContext transaction) {
-        long revision = transaction.select(VAULT_METADATA.CURRENT_REVISION)
-                .from(VAULT_METADATA)
-                .where(VAULT_METADATA.ID.eq(1))
-                .fetchSingle(VAULT_METADATA.CURRENT_REVISION) + 1;
-        transaction.update(VAULT_METADATA)
-                .set(VAULT_METADATA.CURRENT_REVISION, revision)
-                .where(VAULT_METADATA.ID.eq(1))
-                .execute();
-        return revision;
-    }
-
-    private void recordChange(DSLContext transaction, ModifyOperation operation, long revision) {
-        transaction.insertInto(CHANGE_JOURNAL)
-                .columns(
-                        CHANGE_JOURNAL.REVISION,
-                        CHANGE_JOURNAL.OPERATION_ID,
-                        CHANGE_JOURNAL.CHANGE_TYPE,
-                        CHANGE_JOURNAL.ACTOR_TYPE,
-                        CHANGE_JOURNAL.ACTOR_CLIENT_ID,
-                        CHANGE_JOURNAL.COMMITTED_AT)
-                .values(revision, operation.operationId(), "MODIFY", "CLIENT", operation.clientId(), Instant.now().toString())
-                .execute();
-        transaction.insertInto(CHANGE_EFFECT)
-                .columns(
-                        CHANGE_EFFECT.REVISION,
-                        CHANGE_EFFECT.ORDINAL,
-                        CHANGE_EFFECT.PATH,
-                        CHANGE_EFFECT.ENTRY_TYPE,
-                        CHANGE_EFFECT.STATE,
-                        CHANGE_EFFECT.CONTENT_HASH,
-                        CHANGE_EFFECT.SIZE)
-                .values(
-                        revision,
-                        0,
-                        operation.path().value(),
-                        "FILE",
-                        "PRESENT",
-                        operation.contentHash(),
-                        operation.size())
-                .execute();
-    }
-
-    private void completeOperation(DSLContext transaction, String operationId, long revision) {
-        int completed = transaction.update(OPERATIONS)
-                .set(OPERATIONS.STATUS, "COMMITTED")
-                .set(OPERATIONS.RESULT_REVISION, revision)
-                .set(OPERATIONS.COMPLETED_AT, Instant.now().toString())
-                .where(OPERATIONS.OPERATION_ID.eq(operationId).and(OPERATIONS.STATUS.eq("PREPARED")))
-                .execute();
-
-        if (completed != 1) {
-            throw new IllegalStateException("Prepared modify could not be finalized: " + operationId);
-        }
-    }
-
-    private void requireMatchingDigest(ModifyOperation operation, String storedDigest) {
-        if (!requestDigest(operation).equals(storedDigest)) {
-            throw new OperationIdReuseException(operation.operationId());
-        }
     }
 
     private static String requestDigest(ModifyOperation operation) {
@@ -314,28 +213,6 @@ public final class ModifyCoordinator {
                 Long.toString(operation.size())));
     }
 
-    private Path requireStagedContent(Path stagedContent) {
-        Path normalized = stagedContent.toAbsolutePath().normalize();
-
-        if (!normalized.getParent().equals(dataDirectories.staging()) || !Files.isRegularFile(normalized)) {
-            throw new IllegalArgumentException("Modify content must be staged under the server staging directory");
-        }
-
-        return normalized;
-    }
-
-    private Path stagingPath(String reference) {
-        if (reference == null || reference.isBlank()) {
-            throw new IllegalStateException("Missing staging reference in operation metadata");
-        }
-
-        Path staged = dataDirectories.staging().resolve(reference).normalize();
-        if (!staged.getParent().equals(dataDirectories.staging())) {
-            throw new IllegalStateException("Invalid staging reference in operation metadata");
-        }
-        return staged;
-    }
-
     private Path recoveryPath(ModifyOperation operation) {
         return dataDirectories.recovery().resolve(recoveryReference(operation));
     }
@@ -347,42 +224,9 @@ public final class ModifyCoordinator {
     private void discardRecovery(ModifyOperation operation) {
         try {
             Files.deleteIfExists(recoveryPath(operation));
-            forceDirectory(dataDirectories.recovery());
+            VaultFiles.forceDirectory(dataDirectories.recovery());
         } catch (IOException ignored) {
             // A retained backup is safe and can be collected after the committed state is durable.
-        }
-    }
-
-    private static boolean matches(String expectedHash, long expectedSize, Path file) {
-        if (!Files.isRegularFile(file)) {
-            return false;
-        }
-
-        try {
-            ContentHash.HashedContent actual = ContentHash.calculate(file);
-            return expectedHash.equals(actual.value()) && (expectedSize < 0 || expectedSize == actual.size());
-        } catch (IOException exception) {
-            throw new IllegalStateException("Could not hash an authoritative file", exception);
-        }
-    }
-
-    private static void forceDirectory(Path directory) {
-        try (FileChannel channel = FileChannel.open(directory, StandardOpenOption.READ)) {
-            channel.force(true);
-        } catch (IOException exception) {
-            throw new IllegalStateException("Could not durably update directory: " + directory, exception);
-        }
-    }
-
-    private void forceVaultDirectories(Path directory) {
-        Path current = directory;
-
-        while (true) {
-            forceDirectory(current);
-            if (current.equals(dataDirectories.vault())) {
-                return;
-            }
-            current = current.getParent();
         }
     }
 }

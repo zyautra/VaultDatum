@@ -66,7 +66,7 @@ public final class VaultIntegrityScan {
                     if (directory.equals(vault)) {
                         return FileVisitResult.CONTINUE;
                     }
-                    String path = relativePath(vault, directory);
+                    String path = VaultFiles.relativePath(vault, directory);
                     Recorded entry = recorded.get(path);
                     if (entry != null) {
                         seen.add(path);
@@ -85,7 +85,7 @@ public final class VaultIntegrityScan {
 
                 @Override
                 public FileVisitResult visitFile(Path file, BasicFileAttributes attributes) {
-                    String path = relativePath(vault, file);
+                    String path = VaultFiles.relativePath(vault, file);
                     Recorded entry = recorded.get(path);
                     if (entry == null) {
                         drifts.add(new Drift(path, DriftKind.UNKNOWN_ENTRY));
@@ -102,7 +102,7 @@ public final class VaultIntegrityScan {
 
                 @Override
                 public FileVisitResult visitFileFailed(Path file, IOException exception) {
-                    String path = relativePath(vault, file);
+                    String path = VaultFiles.relativePath(vault, file);
                     seen.add(path);
                     drifts.add(new Drift(path, DriftKind.UNREADABLE));
                     return FileVisitResult.CONTINUE;
@@ -157,14 +157,6 @@ public final class VaultIntegrityScan {
             }
         }
         return false;
-    }
-
-    private static String relativePath(Path vault, Path file) {
-        List<String> segments = new ArrayList<>();
-        for (Path segment : vault.relativize(file)) {
-            segments.add(segment.toString());
-        }
-        return String.join("/", segments);
     }
 
     public enum DriftKind {

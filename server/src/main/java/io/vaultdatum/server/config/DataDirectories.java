@@ -49,6 +49,33 @@ public final class DataDirectories {
         return root.resolve("recovery");
     }
 
+    /**
+     * Resolves a staging reference recorded in operation metadata.
+     */
+    public Path stagedFile(String reference) {
+        if (reference == null || reference.isBlank()) {
+            throw new IllegalStateException("Missing staging reference in operation metadata");
+        }
+
+        Path staged = staging().resolve(reference).normalize();
+        if (!staging().equals(staged.getParent())) {
+            throw new IllegalStateException("Invalid staging reference in operation metadata");
+        }
+        return staged;
+    }
+
+    /**
+     * Requires uploaded content to be a regular file directly under the staging directory.
+     */
+    public Path requireStagedFile(Path content) {
+        Path normalized = content.toAbsolutePath().normalize();
+
+        if (!staging().equals(normalized.getParent()) || !Files.isRegularFile(normalized)) {
+            throw new IllegalArgumentException("Content must be staged under the server staging directory");
+        }
+        return normalized;
+    }
+
     private void createDirectory(Path directory) {
         try {
             Files.createDirectories(directory);

@@ -1,6 +1,5 @@
 package io.vaultdatum.server.sync;
 
-import static io.vaultdatum.server.jooq.Tables.CHANGE_EFFECT;
 import static io.vaultdatum.server.jooq.Tables.CHANGE_JOURNAL;
 import static io.vaultdatum.server.jooq.Tables.OPERATIONS;
 import static io.vaultdatum.server.jooq.Tables.PATH_STATE;
@@ -21,11 +20,9 @@ import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.nio.file.SimpleFileVisitor;
 import java.nio.file.attribute.BasicFileAttributes;
-import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
-import java.util.stream.Stream;
 
 /**
  * Imports files copied into a new server Vault as the initial journal.
@@ -122,13 +119,13 @@ public final class InitialVaultImport {
                     if (directory.equals(vault)) {
                         return FileVisitResult.CONTINUE;
                     }
-                    String path = relativePath(vault, directory);
+                    String path = VaultFiles.relativePath(vault, directory);
                     String problem = pathProblem(directory, path);
                     if (problem != null) {
                         problems.add(new Problem(path, problem));
                         return FileVisitResult.SKIP_SUBTREE;
                     }
-                    if (isEmpty(directory)) {
+                    if (isEmptyDirectory(directory)) {
                         entries.add(new Entry(path, EntryType.DIRECTORY));
                     }
                     return FileVisitResult.CONTINUE;
@@ -136,7 +133,7 @@ public final class InitialVaultImport {
 
                 @Override
                 public FileVisitResult visitFile(Path file, BasicFileAttributes attributes) {
-                    String path = relativePath(vault, file);
+                    String path = VaultFiles.relativePath(vault, file);
                     String problem = pathProblem(file, path);
                     if (problem == null && !attributes.isRegularFile()) {
                         problem = "not a regular file";
@@ -154,7 +151,7 @@ public final class InitialVaultImport {
 
                 @Override
                 public FileVisitResult visitFileFailed(Path file, IOException exception) {
-                    problems.add(new Problem(relativePath(vault, file), "unreadable"));
+                    problems.add(new Problem(VaultFiles.relativePath(vault, file), "unreadable"));
                     return FileVisitResult.CONTINUE;
                 }
             });
@@ -201,57 +198,43 @@ public final class InitialVaultImport {
         return dsl.transactionResult(configuration -> {
             DSLContext transaction = DSL.using(configuration);
             long revision = 0;
-            String committedAt = Instant.now().toString();
 
             for (ImportedEntry imported : entries) {
-                revision++;
+                revision = ChangeJournal.nextRevision(transaction);
                 String path = imported.entry().path();
-                String entryType = imported.entry().type().name();
-                String contentHash = imported.content() == null ? null : imported.content().value();
-                Long size = imported.content() == null ? null : imported.content().size();
+                ChangeJournal.appendServerExternalChange(transaction, revision, "IMPORT-" + UUID.randomUUID(), "CREATE");
 
-                transaction.insertInto(PATH_STATE)
-                        .columns(
-                                PATH_STATE.PATH,
-                                PATH_STATE.ENTRY_TYPE,
-                                PATH_STATE.STATE,
-                                PATH_STATE.LATEST_REVISION,
-                                PATH_STATE.CONTENT_HASH,
-                                PATH_STATE.SIZE)
-                        .values(path, entryType, "PRESENT", revision, contentHash, size)
-                        .execute();
-                transaction.insertInto(CHANGE_JOURNAL)
-                        .columns(
-                                CHANGE_JOURNAL.REVISION,
-                                CHANGE_JOURNAL.OPERATION_ID,
-                                CHANGE_JOURNAL.CHANGE_TYPE,
-                                CHANGE_JOURNAL.ACTOR_TYPE,
-                                CHANGE_JOURNAL.COMMITTED_AT)
-                        .values(revision, "IMPORT-" + UUID.randomUUID(), "CREATE", "SERVER_EXTERNAL", committedAt)
-                        .execute();
-                transaction.insertInto(CHANGE_EFFECT)
-                        .columns(
-                                CHANGE_EFFECT.REVISION,
-                                CHANGE_EFFECT.ORDINAL,
-                                CHANGE_EFFECT.PATH,
-                                CHANGE_EFFECT.ENTRY_TYPE,
-                                CHANGE_EFFECT.STATE,
-                                CHANGE_EFFECT.CONTENT_HASH,
-                                CHANGE_EFFECT.SIZE)
-                        .values(revision, 0, path, entryType, "PRESENT", contentHash, size)
-                        .execute();
-            }
-
-            int updated = transaction.update(VAULT_METADATA)
-                    .set(VAULT_METADATA.CURRENT_REVISION, revision)
-                    .where(VAULT_METADATA.ID.eq(1))
-                    .and(VAULT_METADATA.CURRENT_REVISION.eq(0L))
-                    .execute();
-            if (updated != 1) {
-                throw new InitialVaultImportException("The journal changed during the initial import");
+                if (imported.content() == null) {
+                    transaction.insertInto(PATH_STATE)
+                            .columns(PATH_STATE.PATH, PATH_STATE.ENTRY_TYPE, PATH_STATE.STATE, PATH_STATE.LATEST_REVISION)
+                            .values(path, "DIRECTORY", "PRESENT", revision)
+                            .execute();
+                    ChangeJournal.appendPresentDirectory(transaction, revision, 0, path);
+                } else {
+                    transaction.insertInto(PATH_STATE)
+                            .columns(
+                                    PATH_STATE.PATH,
+                                    PATH_STATE.ENTRY_TYPE,
+                                    PATH_STATE.STATE,
+                                    PATH_STATE.LATEST_REVISION,
+                                    PATH_STATE.CONTENT_HASH,
+                                    PATH_STATE.SIZE)
+                            .values(path, "FILE", "PRESENT", revision, imported.content().value(), imported.content().size())
+                            .execute();
+                    ChangeJournal.appendPresentFile(
+                            transaction, revision, 0, path, imported.content().value(), imported.content().size());
+                }
             }
             return revision;
         });
+    }
+
+    private static boolean isEmptyDirectory(Path directory) {
+        try {
+            return VaultFiles.isEmptyDirectory(directory);
+        } catch (IOException exception) {
+            return false;
+        }
     }
 
     private static String pathProblem(Path entry, String path) {
@@ -264,22 +247,6 @@ public final class InitialVaultImport {
         } catch (IllegalArgumentException exception) {
             return "invalid sync path";
         }
-    }
-
-    private static boolean isEmpty(Path directory) {
-        try (Stream<Path> children = Files.list(directory)) {
-            return children.findAny().isEmpty();
-        } catch (IOException exception) {
-            return false;
-        }
-    }
-
-    private static String relativePath(Path vault, Path file) {
-        List<String> segments = new ArrayList<>();
-        for (Path segment : vault.relativize(file)) {
-            segments.add(segment.toString());
-        }
-        return String.join("/", segments);
     }
 
     enum EntryType {

@@ -9,7 +9,6 @@ import io.vaultdatum.server.sync.BaseStateMismatchException;
 import io.vaultdatum.server.sync.CreateCoordinator;
 import io.vaultdatum.server.sync.CreateBase;
 import io.vaultdatum.server.sync.CreateOperation;
-import io.vaultdatum.server.sync.CreateOperationResult;
 import io.vaultdatum.server.sync.DeletedCreateBase;
 import io.vaultdatum.server.sync.ModifyCoordinator;
 import io.vaultdatum.server.sync.ModifyOperation;
@@ -103,7 +102,7 @@ public final class OperationResource {
 
             if ("CREATE".equals(request.type())) {
                 CreateOperation operation = createOperation(request, actualContent);
-                CreateOperationResult result = createCoordinator.commit(operation, stagedContent);
+                OperationResult result = createCoordinator.commit(operation, stagedContent);
                 discardReplayUpload(result.replayed(), stagedContent);
                 publishRevision(result.replayed(), result.resultRevision());
                 return Response.ok(response(result)).build();
@@ -235,11 +234,6 @@ public final class OperationResource {
                 || !request.content().contentHash().matches("sha256:[0-9a-f]{64}")) {
             throw new IllegalArgumentException("Content operation metadata is invalid");
         }
-    }
-
-    private static OperationResultResponse response(CreateOperationResult result) {
-        return new OperationResultResponse(
-                result.operationId(), "COMMITTED", result.resultRevision(), result.replayed());
     }
 
     private static OperationResultResponse response(OperationResult result) {
