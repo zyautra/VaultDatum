@@ -4,6 +4,7 @@ import io.vaultdatum.server.config.DataDirectories;
 import io.vaultdatum.server.sync.CreateCoordinator;
 import io.vaultdatum.server.sync.DeleteCoordinator;
 import io.vaultdatum.server.sync.DirectoryCoordinator;
+import io.vaultdatum.server.sync.InitialVaultImport;
 import io.vaultdatum.server.sync.ModifyCoordinator;
 import io.vaultdatum.server.sync.PathChangeCoordinator;
 import io.vaultdatum.server.sync.VaultIntegrityScan;
@@ -32,6 +33,8 @@ public final class DatabaseInitializer {
 
     private final DirectoryCoordinator directoryCoordinator;
 
+    private final InitialVaultImport initialVaultImport;
+
     private final VaultIntegrityScan integrityScan;
 
     public DatabaseInitializer(
@@ -43,6 +46,7 @@ public final class DatabaseInitializer {
             DeleteCoordinator deleteCoordinator,
             PathChangeCoordinator pathChangeCoordinator,
             DirectoryCoordinator directoryCoordinator,
+            InitialVaultImport initialVaultImport,
             VaultIntegrityScan integrityScan) {
         this.dataDirectories = dataDirectories;
         this.flyway = flyway;
@@ -52,6 +56,7 @@ public final class DatabaseInitializer {
         this.deleteCoordinator = deleteCoordinator;
         this.pathChangeCoordinator = pathChangeCoordinator;
         this.directoryCoordinator = directoryCoordinator;
+        this.initialVaultImport = initialVaultImport;
         this.integrityScan = integrityScan;
     }
 
@@ -65,6 +70,7 @@ public final class DatabaseInitializer {
         deleteCoordinator.recoverPreparedDeletes();
         pathChangeCoordinator.recoverPreparedPathChanges();
         directoryCoordinator.recoverPreparedDirectories();
+        initialVaultImport.runIfRequested();
         integrityScan.scan();
     }
 }

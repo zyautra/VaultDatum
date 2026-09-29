@@ -202,6 +202,31 @@ the optional variables. Provision the mount owner before startup. Do not use a
 personal login account, and do not rely on the fallback UID matching a Host
 user.
 
+## Server Vault Write Boundary
+
+The server Vault is modified only through the Sync API. Do not edit, copy, or
+delete files in the server `vault` directory directly, and do not open it as an
+editor workspace. After startup recovery the server runs a detect-only
+integrity scan and logs each difference as `external_drift_detected`; it never
+imports, reverts, or overwrites drift. A client mutation on a drifted path is
+rejected as `503 RECOVERY_REQUIRED` before anything is prepared, while other
+paths keep synchronizing. Resolve drift by restoring the recorded content, or
+by moving the edited content out of the Vault, restoring the recorded state,
+and submitting it again through a client.
+
+### Migrate an Existing Vault
+
+To move an existing Vault from other storage, copy its files once into the
+`vault` directory of a new, empty data root and start the server with
+`VAULTDATUM_INITIAL_IMPORT=true`. Leave out `.obsidian/`, `.git/`, and every
+other name that starts with `.`, symbolic links, and files larger than
+`VAULTDATUM_MAX_CONTENT_BYTES`. The server then records every regular file and
+empty directory as a `SERVER_EXTERNAL` CREATE in one transaction. If any entry
+cannot be imported, or the Vault directory is empty, startup fails, the log
+lists each rejected path as `initial_import_rejected`, and nothing is recorded.
+Once `initial_import_complete` is logged, unset the flag and restart. The server
+refuses to start with the flag set after the journal has any change.
+
 ## Deploy on Kubernetes
 
 `deploy/kubernetes/base` is portable: it makes no assumptions about a
