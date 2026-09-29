@@ -20,6 +20,7 @@ import io.vaultdatum.server.sync.RecoveryRequiredException;
 import io.vaultdatum.server.sync.RevisionNotificationPublisher;
 import io.vaultdatum.server.sync.SyncPath;
 import io.vaultdatum.server.sync.UnknownCreateBase;
+import io.vaultdatum.server.sync.VaultDriftException;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 import jakarta.ws.rs.Consumes;
 import jakarta.ws.rs.POST;
@@ -123,6 +124,9 @@ public final class OperationResource {
         } catch (OperationIdReuseException exception) {
             deleteIfPresent(stagedContent);
             return error(Response.Status.CONFLICT.getStatusCode(), "OPERATION_ID_REUSED", exception.getMessage());
+        } catch (VaultDriftException exception) {
+            deleteIfPresent(stagedContent);
+            return error(Response.Status.SERVICE_UNAVAILABLE.getStatusCode(), "RECOVERY_REQUIRED", exception.getMessage());
         } catch (RecoveryRequiredException exception) {
             return error(Response.Status.SERVICE_UNAVAILABLE.getStatusCode(), "RECOVERY_REQUIRED", exception.getMessage());
         } catch (IllegalArgumentException exception) {

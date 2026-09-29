@@ -30,9 +30,12 @@ public final class ModifyCoordinator {
 
     private final DSLContext dsl;
 
-    public ModifyCoordinator(DataDirectories dataDirectories, DSLContext dsl) {
+    private final VaultDriftGuard driftGuard;
+
+    public ModifyCoordinator(DataDirectories dataDirectories, DSLContext dsl, VaultDriftGuard driftGuard) {
         this.dataDirectories = dataDirectories;
         this.dsl = dsl;
+        this.driftGuard = driftGuard;
     }
 
     public OperationResult commit(ModifyOperation operation, Path stagedContent) {
@@ -50,6 +53,7 @@ public final class ModifyCoordinator {
 
         Path staged = requireStagedContent(stagedContent);
         forceDirectory(staged.getParent());
+        driftGuard.requireRecordedFile(operation.path());
         prepare(operation, staged);
         apply(operation, staged);
         OperationResult result = finalize(operation);

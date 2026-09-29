@@ -30,9 +30,12 @@ public final class DeleteCoordinator {
 
     private final DSLContext dsl;
 
-    public DeleteCoordinator(DataDirectories dataDirectories, DSLContext dsl) {
+    private final VaultDriftGuard driftGuard;
+
+    public DeleteCoordinator(DataDirectories dataDirectories, DSLContext dsl, VaultDriftGuard driftGuard) {
         this.dataDirectories = dataDirectories;
         this.dsl = dsl;
+        this.driftGuard = driftGuard;
     }
 
     public OperationResult commit(DeleteOperation operation) {
@@ -48,6 +51,7 @@ public final class DeleteCoordinator {
             return replayed;
         }
 
+        driftGuard.requireRecordedFile(operation.path());
         prepare(operation);
         apply(operation);
         OperationResult result = finalize(operation);

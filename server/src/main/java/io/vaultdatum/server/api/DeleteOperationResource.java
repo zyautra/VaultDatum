@@ -19,6 +19,7 @@ import io.vaultdatum.server.sync.PathChangeCoordinator;
 import io.vaultdatum.server.sync.PathChangeOperation;
 import io.vaultdatum.server.sync.RevisionNotificationPublisher;
 import io.vaultdatum.server.sync.SyncPath;
+import io.vaultdatum.server.sync.VaultDriftException;
 import jakarta.ws.rs.Consumes;
 import jakarta.ws.rs.POST;
 import jakarta.ws.rs.Path;
@@ -83,7 +84,7 @@ public final class DeleteOperationResource {
             return error(Response.Status.CONFLICT, "BASE_STATE_MISMATCH", exception.getMessage());
         } catch (OperationIdReuseException exception) {
             return error(Response.Status.CONFLICT, "OPERATION_ID_REUSED", exception.getMessage());
-        } catch (RecoveryRequiredException exception) {
+        } catch (VaultDriftException | RecoveryRequiredException exception) {
             return error(Response.Status.SERVICE_UNAVAILABLE, "RECOVERY_REQUIRED", exception.getMessage());
         }
     }

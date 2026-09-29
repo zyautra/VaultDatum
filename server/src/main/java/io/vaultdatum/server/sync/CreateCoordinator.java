@@ -30,9 +30,12 @@ public final class CreateCoordinator {
 
     private final DSLContext dsl;
 
-    public CreateCoordinator(DataDirectories dataDirectories, DSLContext dsl) {
+    private final VaultDriftGuard driftGuard;
+
+    public CreateCoordinator(DataDirectories dataDirectories, DSLContext dsl, VaultDriftGuard driftGuard) {
         this.dataDirectories = dataDirectories;
         this.dsl = dsl;
+        this.driftGuard = driftGuard;
     }
 
     public CreateOperationResult commit(CreateOperation operation, Path stagedContent) {
@@ -49,6 +52,7 @@ public final class CreateCoordinator {
         }
 
         Path normalizedStaging = requireStagedContent(stagedContent);
+        driftGuard.requireUnrecordedPathAbsent(operation.path());
         ensureTargetIsAbsent(operation);
         forceDirectory(normalizedStaging.getParent());
         prepare(operation, normalizedStaging);

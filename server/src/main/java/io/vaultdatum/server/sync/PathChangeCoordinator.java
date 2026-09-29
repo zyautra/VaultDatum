@@ -30,9 +30,12 @@ public final class PathChangeCoordinator {
 
     private final DSLContext dsl;
 
-    public PathChangeCoordinator(DataDirectories dataDirectories, DSLContext dsl) {
+    private final VaultDriftGuard driftGuard;
+
+    public PathChangeCoordinator(DataDirectories dataDirectories, DSLContext dsl, VaultDriftGuard driftGuard) {
         this.dataDirectories = dataDirectories;
         this.dsl = dsl;
+        this.driftGuard = driftGuard;
     }
 
     public OperationResult commit(PathChangeOperation operation) {
@@ -41,6 +44,8 @@ public final class PathChangeCoordinator {
             if (replayed != null) {
                 return replayed;
             }
+            driftGuard.requireRecordedFile(operation.sourcePath());
+            driftGuard.requireUnrecordedPathAbsent(operation.destinationPath());
             prepare(operation);
             apply(operation);
             return finalize(operation);
