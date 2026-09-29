@@ -19,7 +19,7 @@ services:
       context: ./server
       dockerfile: src/main/docker/Dockerfile.native
       args:
-        APP_VERSION: "0.4.0"
+        APP_VERSION: "0.5.0"
     image: vaultdatum-server:local
     user: "${VAULTDATUM_RUNTIME_UID:-1001}:${VAULTDATUM_RUNTIME_GID:-0}"
     depends_on:
