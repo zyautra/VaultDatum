@@ -443,3 +443,86 @@
         flex: 1 1 0;
     }
 }
+
+.vaultdatum-file-history {
+    width: min(960px, 95vw);
+}
+
+.vaultdatum-file-history-path {
+    color: var(--text-muted);
+    margin-bottom: var(--size-4-3);
+    overflow-wrap: anywhere;
+}
+
+.vaultdatum-file-history-body {
+    display: grid;
+    gap: var(--size-4-3);
+    grid-template-columns: minmax(200px, 1fr) 2fr;
+    max-height: 60vh;
+}
+
+.vaultdatum-file-history-list,
+.vaultdatum-file-history-preview {
+    min-width: 0;
+    overflow: auto;
+}
+
+.vaultdatum-file-history-entry,
+.vaultdatum-file-history-more {
+    display: block;
+    height: auto;
+    margin-bottom: var(--size-2-2);
+    text-align: start;
+    white-space: normal;
+    width: 100%;
+}
+
+.vaultdatum-file-history-entry.is-selected {
+    outline: 2px solid var(--interactive-accent);
+}
+
+.vaultdatum-file-history-entry.is-unavailable {
+    color: var(--text-faint);
+}
+
+.vaultdatum-file-history-detail,
+.vaultdatum-file-history-diff-caption {
+    color: var(--text-muted);
+    font-size: var(--font-ui-smaller);
+}
+
+.vaultdatum-file-history-diff {
+    font-family: var(--font-monospace);
+    font-size: var(--font-ui-smaller);
+    white-space: pre;
+}
+
+.vaultdatum-file-history-diff-line.is-removed {
+    background-color: rgba(var(--color-red-rgb), 0.15);
+}
+
+.vaultdatum-file-history-diff-line.is-added {
+    background-color: rgba(var(--color-green-rgb), 0.15);
+}
+
+.vaultdatum-file-history-diff-number {
+    color: var(--text-faint);
+    display: inline-block;
+    min-width: 3em;
+}
+
+.vaultdatum-file-history-diff-marker {
+    display: inline-block;
+    width: 1.5em;
+}
+
+.vaultdatum-file-history-preview img {
+    max-width: 100%;
+}
+
+@media (max-width: 700px) {
+    .vaultdatum-file-history-body {
+        grid-template-columns: 1fr;
+        max-height: none;
+    }
+}

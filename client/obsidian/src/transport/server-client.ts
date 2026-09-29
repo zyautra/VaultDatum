@@ -91,6 +91,39 @@ export type ReadResult<T> =
     | { readonly kind: "MANIFEST_EXPIRED" }
     | { readonly kind: "HISTORY_NOT_AVAILABLE" };
 
+export interface RemoteHistoryEntry {
+    readonly revision: number;
+    readonly type: RemoteChange["type"];
+    readonly committedAt: string;
+    readonly actor: RemoteActor;
+    readonly state: "PRESENT" | "DELETED";
+    readonly contentHash?: string;
+    readonly size?: number;
+    readonly contentAvailable: boolean;
+    readonly previousPath?: string;
+}
+
+export interface RemoteHistoryPage {
+    readonly path: string;
+    readonly entries: readonly RemoteHistoryEntry[];
+    readonly hasMore: boolean;
+}
+
+export type HistoryContentResult =
+    ReadResult<ArrayBuffer> | { readonly kind: "CONTENT_NOT_RETAINED" };
+
+export interface HistoryTransport {
+    listFileHistory(
+        serverUrl: string,
+        path: string,
+        before?: number,
+    ): Promise<ReadResult<RemoteHistoryPage>>;
+    downloadHistoryContent(
+        serverUrl: string,
+        contentHash: string,
+    ): Promise<HistoryContentResult>;
+}
+
 export interface ContentTransport {
     downloadContent(
         serverUrl: string,
@@ -154,7 +187,7 @@ export interface SyncTransport extends ContentTransport {
     ): Promise<SubmitOperationResult>;
 }
 
-export class ServerClient implements SyncTransport {
+export class ServerClient implements SyncTransport, HistoryTransport {
     public constructor(
         private readonly vaultAccessToken: () => string = () => "",
     ) {}
@@ -284,6 +317,67 @@ export class ServerClient implements SyncTransport {
             throw new Error(
                 "Server returned content with an unexpected hash header",
             );
+        }
+
+        return readFailure(response.status, response.text);
+    }
+
+    public async listFileHistory(
+        serverUrl: string,
+        path: string,
+        before?: number,
+    ): Promise<ReadResult<RemoteHistoryPage>> {
+        const query = new URLSearchParams({ path });
+        if (before !== undefined) {
+            query.set("before", before.toString());
+        }
+        const response = await requestUrl({
+            url: `${serverUrl}/api/v1/history?${query.toString()}`,
+            headers: this.authorizationHeaders(serverUrl),
+            throw: false,
+        });
+
+        if (response.status === 200) {
+            const page = historyPage(response.text);
+
+            if (page !== undefined && page.path === path) {
+                return { kind: "OK", value: page };
+            }
+
+            throw new Error("Server returned an invalid file history page");
+        }
+
+        return readFailure(response.status, response.text);
+    }
+
+    public async downloadHistoryContent(
+        serverUrl: string,
+        contentHash: string,
+    ): Promise<HistoryContentResult> {
+        const query = new URLSearchParams({ contentHash });
+        const response = await requestUrl({
+            url: `${serverUrl}/api/v1/history/content?${query.toString()}`,
+            headers: this.authorizationHeaders(serverUrl),
+            throw: false,
+        });
+
+        if (response.status === 200) {
+            if (
+                header(response.headers, "x-vaultdatum-content-hash") ===
+                contentHash
+            ) {
+                return { kind: "OK", value: response.arrayBuffer };
+            }
+
+            throw new Error(
+                "Server returned history content with an unexpected hash header",
+            );
+        }
+        if (
+            response.status === 404 &&
+            errorCode(response.text) === "CONTENT_NOT_RETAINED"
+        ) {
+            return { kind: "CONTENT_NOT_RETAINED" };
         }
 
         return readFailure(response.status, response.text);
@@ -848,6 +942,73 @@ function manifestEntry(value: unknown): RemoteManifestEntry | undefined {
     }
 
     return undefined;
+}
+
+function historyPage(content: string): RemoteHistoryPage | undefined {
+    const parsed = parseJson(content);
+
+    if (
+        !isRecord(parsed) ||
+        typeof parsed.path !== "string" ||
+        typeof parsed.hasMore !== "boolean" ||
+        !Array.isArray(parsed.entries)
+    ) {
+        return undefined;
+    }
+
+    const entries = parsed.entries.map(historyEntry);
+    if (entries.some((entry) => entry === undefined)) {
+        return undefined;
+    }
+
+    return {
+        path: parsed.path,
+        entries: entries as RemoteHistoryEntry[],
+        hasMore: parsed.hasMore,
+    };
+}
+
+function historyEntry(value: unknown): RemoteHistoryEntry | undefined {
+    if (
+        !isRecord(value) ||
+        !positiveInteger(value.revision) ||
+        !changeType(value.type) ||
+        typeof value.committedAt !== "string" ||
+        (value.state !== "PRESENT" && value.state !== "DELETED") ||
+        typeof value.contentAvailable !== "boolean"
+    ) {
+        return undefined;
+    }
+
+    const actor = changeActor(value.actor);
+    if (actor === undefined) {
+        return undefined;
+    }
+    if (
+        value.state === "PRESENT" &&
+        (typeof value.contentHash !== "string" ||
+            !nonNegativeInteger(value.size))
+    ) {
+        return undefined;
+    }
+
+    return {
+        revision: value.revision,
+        type: value.type,
+        committedAt: value.committedAt,
+        actor,
+        state: value.state,
+        contentHash:
+            typeof value.contentHash === "string"
+                ? value.contentHash
+                : undefined,
+        size: nonNegativeInteger(value.size) ? value.size : undefined,
+        contentAvailable: value.contentAvailable,
+        previousPath:
+            typeof value.previousPath === "string"
+                ? value.previousPath
+                : undefined,
+    };
 }
 
 function change(value: unknown): RemoteChange | undefined {

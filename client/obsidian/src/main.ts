@@ -5,6 +5,7 @@ import {
 } from "./core/content-limits";
 import { ClientStore, type RemoteConflict } from "./storage/client-store";
 import { CreateSync, type SyncSummary } from "./sync/create-sync";
+import { FileRestore, type RestoreOutcome } from "./sync/file-restore";
 import { NotificationChannel } from "./sync/notification-channel";
 import {
     SyncScheduler,
@@ -14,7 +15,10 @@ import {
     type SyncStatus,
 } from "./sync/sync-scheduler";
 import { ServerAuthenticationError } from "./transport/access-token";
-import { ServerClient } from "./transport/server-client";
+import {
+    ServerClient,
+    type RemoteHistoryEntry,
+} from "./transport/server-client";
 import {
     type VaultDatumSettings,
     DEFAULT_SETTINGS,
@@ -37,6 +41,11 @@ import {
     ConflictResolutionModal,
     KeepBothDestinationModal,
 } from "./ui/conflict-modals";
+import {
+    DeletedFilePickerModal,
+    FileHistoryModal,
+    type FileHistoryController,
+} from "./ui/file-history-modal";
 import { ManualMergeModal } from "./ui/manual-merge-modal";
 import {
     VaultDatumSettingTab,
@@ -53,6 +62,8 @@ export default class VaultDatumPlugin extends Plugin {
     private store: ClientStore | undefined;
 
     private createSync: CreateSync | undefined;
+
+    private fileRestore: FileRestore | undefined;
 
     private notificationChannel: NotificationChannel | undefined;
 
@@ -83,11 +94,20 @@ export default class VaultDatumPlugin extends Plugin {
         this.store = await ClientStore.open(this.syncSettings.databaseName);
         this.lastPersistedSuccessfulAt =
             await this.store.lastSuccessfulSyncAt();
-        this.createSync = new CreateSync(
+        const localVault = new ObsidianLocalVault(this.app);
+        const createSync = new CreateSync(
             this.store,
             this.serverClient,
-            new ObsidianLocalVault(this.app),
+            localVault,
             () => this.serverUrl(),
+        );
+        this.createSync = createSync;
+        this.fileRestore = new FileRestore(
+            this.store,
+            this.serverClient,
+            localVault,
+            () => this.serverUrl(),
+            (path, content) => createSync.captureModify(path, content),
         );
         this.syncScheduler = new SyncScheduler({
             run: (mode, reportProgress): Promise<SyncSummary> => {
@@ -236,6 +256,41 @@ export default class VaultDatumPlugin extends Plugin {
                 void this.openKeepBothConflictPicker();
             },
         });
+        this.addCommand({
+            id: "show-file-history",
+            name: "Show file history",
+            checkCallback: (checking) => {
+                const file = this.app.workspace.getActiveFile();
+                if (file === null) {
+                    return false;
+                }
+                if (!checking) {
+                    void this.openFileHistory(file.path);
+                }
+                return true;
+            },
+        });
+        this.addCommand({
+            id: "restore-deleted-file",
+            name: "Restore deleted file",
+            callback: () => {
+                void this.openDeletedFilePicker();
+            },
+        });
+        this.registerEvent(
+            this.app.workspace.on("file-menu", (menu, file) => {
+                if (file instanceof TFile) {
+                    menu.addItem((item) =>
+                        item
+                            .setTitle("File history")
+                            .setIcon("history")
+                            .onClick(() => {
+                                void this.openFileHistory(file.path);
+                            }),
+                    );
+                }
+            }),
+        );
         this.addCommand({
             id: "resolve-conflict-manual-merge",
             name: "Resolve conflict: merge manually",
@@ -1110,6 +1165,84 @@ export default class VaultDatumPlugin extends Plugin {
         }
     }
 
+    private async openFileHistory(path: string): Promise<void> {
+        const store = this.store;
+        const fileRestore = this.fileRestore;
+
+        if (store === undefined || fileRestore === undefined) {
+            return;
+        }
+        if (this.serverUrl().length === 0) {
+            new Notice("Configure a Server URL before opening file history.");
+            return;
+        }
+
+        const localVault = new ObsidianLocalVault(this.app);
+        const controller: FileHistoryController = {
+            path,
+            ownClientId: await store.clientId(),
+            load: (before) => fileRestore.history(path, before),
+            readCurrent: () => localVault.readFile(path),
+            download: (entry) =>
+                entry.contentHash === undefined
+                    ? Promise.resolve({ kind: "CONTENT_NOT_RETAINED" })
+                    : this.serverClient.downloadHistoryContent(
+                          this.serverUrl(),
+                          entry.contentHash,
+                      ),
+            restore: (entry) => this.restoreFileVersion(path, entry),
+        };
+        new FileHistoryModal(this.app, controller).open();
+    }
+
+    private async openDeletedFilePicker(): Promise<void> {
+        const store = this.store;
+
+        if (store === undefined) {
+            return;
+        }
+
+        const deleted = (await store.replicas())
+            .filter(
+                (entry) =>
+                    entry.entryType === "FILE" && entry.state === "DELETED",
+            )
+            .map((entry) => entry.path)
+            .sort((left, right) => left.localeCompare(right));
+        if (deleted.length === 0) {
+            new Notice("VaultDatum has no deleted files to restore.");
+            return;
+        }
+
+        new DeletedFilePickerModal(this.app, deleted, (path) => {
+            void this.openFileHistory(path);
+        }).open();
+    }
+
+    private async restoreFileVersion(
+        path: string,
+        entry: RemoteHistoryEntry,
+    ): Promise<void> {
+        const fileRestore = this.fileRestore;
+
+        if (fileRestore === undefined) {
+            return;
+        }
+
+        try {
+            const outcome = await fileRestore.restore(path, entry);
+            new Notice(restoreOutcomeMessage(path, outcome));
+            if (outcome.kind === "QUEUED") {
+                void this.syncNow(false);
+            }
+        } catch {
+            console.warn("VaultDatum could not restore a file version");
+            new Notice(
+                `VaultDatum could not restore ${path}. The file was not changed.`,
+            );
+        }
+    }
+
     private async openKeepBothConflictPicker(): Promise<void> {
         const store = this.store;
 
@@ -1422,4 +1555,31 @@ export default class VaultDatumPlugin extends Plugin {
 
 function maximumContentSizeLabel(): string {
     return `${MAX_SYNC_CONTENT_BYTES / (1024 * 1024)} MiB`;
+}
+
+function restoreOutcomeMessage(path: string, outcome: RestoreOutcome): string {
+    switch (outcome.kind) {
+        case "QUEUED":
+            return `VaultDatum queued restoration of ${path}.`;
+        case "UNAVAILABLE":
+            return "File history is available when VaultDatum is connected.";
+        case "NOT_RETAINED":
+            return "That version is no longer kept.";
+        case "BLOCKED":
+            switch (outcome.reason) {
+                case "CONFLICT":
+                    return `Resolve the conflict for ${path} first.`;
+                case "PENDING":
+                case "OUT_OF_SYNC":
+                    return `Sync ${path} first, then restore the version.`;
+                case "PATH_OCCUPIED":
+                    return `A file already exists at ${path}.`;
+                case "UNKNOWN_PATH":
+                    return `VaultDatum does not track ${path} yet.`;
+                case "TOO_LARGE":
+                    return "That version exceeds the attachment size limit.";
+                case "ALREADY_CURRENT":
+                    return "That is already the current version.";
+            }
+    }
 }

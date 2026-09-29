@@ -202,6 +202,17 @@ the optional variables. Provision the mount owner before startup. Do not use a
 personal login account, and do not rely on the fallback UID matching a Host
 user.
 
+**File history** lists every committed version of one file, newest first, from
+the file menu or the **Show file history** command. Markdown versions are
+compared line by line with the current file; images are previewed. **Restore
+this version** rewrites the local file and queues an ordinary MODIFY against
+the latest server state, so other devices receive it like any other edit and a
+concurrent change becomes a normal conflict. **Restore deleted file** picks a
+deleted path and queues an explicit restore CREATE. The server keeps replaced
+and deleted content for `VAULTDATUM_HISTORY_RETENTION_DAYS` (default `90`)
+under `history/` in the data root; older versions stay listed but can no longer
+be restored. Only single files can be restored.
+
 ## Server Vault Write Boundary
 
 The server Vault is modified only through the Sync API. Do not edit, copy, or
