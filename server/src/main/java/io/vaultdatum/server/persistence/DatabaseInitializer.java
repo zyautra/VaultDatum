@@ -6,6 +6,7 @@ import io.vaultdatum.server.sync.DeleteCoordinator;
 import io.vaultdatum.server.sync.DirectoryCoordinator;
 import io.vaultdatum.server.sync.ModifyCoordinator;
 import io.vaultdatum.server.sync.PathChangeCoordinator;
+import io.vaultdatum.server.sync.VaultIntegrityScan;
 import io.quarkus.runtime.Startup;
 import jakarta.annotation.PostConstruct;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -31,6 +32,8 @@ public final class DatabaseInitializer {
 
     private final DirectoryCoordinator directoryCoordinator;
 
+    private final VaultIntegrityScan integrityScan;
+
     public DatabaseInitializer(
             DataDirectories dataDirectories,
             Flyway flyway,
@@ -39,7 +42,8 @@ public final class DatabaseInitializer {
             ModifyCoordinator modifyCoordinator,
             DeleteCoordinator deleteCoordinator,
             PathChangeCoordinator pathChangeCoordinator,
-            DirectoryCoordinator directoryCoordinator) {
+            DirectoryCoordinator directoryCoordinator,
+            VaultIntegrityScan integrityScan) {
         this.dataDirectories = dataDirectories;
         this.flyway = flyway;
         this.vaultMetadataRepository = vaultMetadataRepository;
@@ -48,6 +52,7 @@ public final class DatabaseInitializer {
         this.deleteCoordinator = deleteCoordinator;
         this.pathChangeCoordinator = pathChangeCoordinator;
         this.directoryCoordinator = directoryCoordinator;
+        this.integrityScan = integrityScan;
     }
 
     @PostConstruct
@@ -60,5 +65,6 @@ public final class DatabaseInitializer {
         deleteCoordinator.recoverPreparedDeletes();
         pathChangeCoordinator.recoverPreparedPathChanges();
         directoryCoordinator.recoverPreparedDirectories();
+        integrityScan.scan();
     }
 }
