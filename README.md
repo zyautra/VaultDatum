@@ -248,9 +248,9 @@ cluster:
   -Dquarkus.package.jar.enabled=false \
   --no-daemon
 docker build -f server/src/main/docker/Dockerfile.native \
-  --build-arg APP_VERSION=0.5.0 \
-  -t registry.example.com/vaultdatum/server:0.5.0 server
-docker push registry.example.com/vaultdatum/server:0.5.0
+  --build-arg APP_VERSION=0.5.1 \
+  -t registry.example.com/vaultdatum/server:0.5.1 server
+docker push registry.example.com/vaultdatum/server:0.5.1
 ```
 
 Create an organization-specific overlay outside source control (or use a
@@ -270,7 +270,7 @@ resources:
 images:
   - name: vaultdatum-server
     newName: registry.example.com/vaultdatum/server
-    newTag: "0.5.0"
+    newTag: "0.5.1"
 ```
 
 The public base intentionally does not set a fixed runtime UID/GID. In a
