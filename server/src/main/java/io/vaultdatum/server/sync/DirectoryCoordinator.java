@@ -28,9 +28,15 @@ public final class DirectoryCoordinator {
 
     private final DSLContext dsl;
 
-    public DirectoryCoordinator(DataDirectories dataDirectories, DSLContext dsl) {
+    private final ImplicitParentDirectories implicitParents;
+
+    public DirectoryCoordinator(
+            DataDirectories dataDirectories,
+            DSLContext dsl,
+            ImplicitParentDirectories implicitParents) {
         this.dataDirectories = dataDirectories;
         this.dsl = dsl;
+        this.implicitParents = implicitParents;
     }
 
     public OperationResult create(DirectoryCreateOperation operation) {
@@ -57,7 +63,9 @@ public final class DirectoryCoordinator {
             ensureEmptyDirectory(operation.operationId(), operation.path(), "The directory delete path is not an empty directory");
             prepareDelete(operation);
             applyDelete(operation);
-            return finalizeDelete(operation);
+            OperationResult result = finalizeDelete(operation);
+            implicitParents.pruneAbove(operation.path());
+            return result;
         }
     }
 
@@ -74,7 +82,9 @@ public final class DirectoryCoordinator {
                     operation.operationId(), operation.sourcePath(), "The directory path-change source is not an empty directory");
             preparePathChange(operation);
             applyPathChange(operation);
-            return finalizePathChange(operation);
+            OperationResult result = finalizePathChange(operation);
+            implicitParents.pruneAbove(operation.sourcePath());
+            return result;
         }
     }
 
@@ -138,6 +148,7 @@ public final class DirectoryCoordinator {
                     operation.operationId(), requestDigest(operation), record.get(operations.REQUEST_DIGEST));
             applyDelete(operation);
             finalizeDelete(operation);
+            implicitParents.pruneAbove(operation.path());
         }
     }
 
@@ -172,6 +183,7 @@ public final class DirectoryCoordinator {
                     operation.operationId(), requestDigest(operation), record.get(operations.REQUEST_DIGEST));
             applyPathChange(operation);
             finalizePathChange(operation);
+            implicitParents.pruneAbove(operation.sourcePath());
         }
     }
 

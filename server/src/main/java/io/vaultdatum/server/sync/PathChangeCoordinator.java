@@ -26,10 +26,17 @@ public final class PathChangeCoordinator {
 
     private final VaultDriftGuard driftGuard;
 
-    public PathChangeCoordinator(DataDirectories dataDirectories, DSLContext dsl, VaultDriftGuard driftGuard) {
+    private final ImplicitParentDirectories implicitParents;
+
+    public PathChangeCoordinator(
+            DataDirectories dataDirectories,
+            DSLContext dsl,
+            VaultDriftGuard driftGuard,
+            ImplicitParentDirectories implicitParents) {
         this.dataDirectories = dataDirectories;
         this.dsl = dsl;
         this.driftGuard = driftGuard;
+        this.implicitParents = implicitParents;
     }
 
     public OperationResult commit(PathChangeOperation operation) {
@@ -42,7 +49,9 @@ public final class PathChangeCoordinator {
             driftGuard.requireUnrecordedPathAbsent(operation.destinationPath());
             prepare(operation);
             apply(operation);
-            return finalize(operation);
+            OperationResult result = finalize(operation);
+            implicitParents.pruneAbove(operation.sourcePath());
+            return result;
         }
     }
 
@@ -82,6 +91,7 @@ public final class PathChangeCoordinator {
                         operation.operationId(), requestDigest(operation), record.get(operations.REQUEST_DIGEST));
                 apply(operation);
                 finalize(operation);
+                implicitParents.pruneAbove(operation.sourcePath());
             }
         }
     }

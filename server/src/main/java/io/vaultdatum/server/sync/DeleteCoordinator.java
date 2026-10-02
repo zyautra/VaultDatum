@@ -28,15 +28,19 @@ public final class DeleteCoordinator {
 
     private final ContentHistory contentHistory;
 
+    private final ImplicitParentDirectories implicitParents;
+
     public DeleteCoordinator(
             DataDirectories dataDirectories,
             DSLContext dsl,
             VaultDriftGuard driftGuard,
-            ContentHistory contentHistory) {
+            ContentHistory contentHistory,
+            ImplicitParentDirectories implicitParents) {
         this.dataDirectories = dataDirectories;
         this.dsl = dsl;
         this.driftGuard = driftGuard;
         this.contentHistory = contentHistory;
+        this.implicitParents = implicitParents;
     }
 
     public OperationResult commit(DeleteOperation operation) {
@@ -56,6 +60,7 @@ public final class DeleteCoordinator {
         prepare(operation);
         apply(operation);
         OperationResult result = finalize(operation);
+        implicitParents.pruneAbove(operation.path());
         contentHistory.retain(recoveryPath(operation), operation.base().contentHash());
         return result;
     }
@@ -96,6 +101,7 @@ public final class DeleteCoordinator {
                     operation.operationId(), requestDigest(operation), record.get(operations.REQUEST_DIGEST));
             apply(operation);
             finalize(operation);
+            implicitParents.pruneAbove(operation.path());
             contentHistory.retain(recoveryPath(operation), operation.base().contentHash());
         }
     }

@@ -5,6 +5,7 @@ import io.vaultdatum.server.sync.ContentHistory;
 import io.vaultdatum.server.sync.CreateCoordinator;
 import io.vaultdatum.server.sync.DeleteCoordinator;
 import io.vaultdatum.server.sync.DirectoryCoordinator;
+import io.vaultdatum.server.sync.ImplicitParentDirectories;
 import io.vaultdatum.server.sync.InitialVaultImport;
 import io.vaultdatum.server.sync.ModifyCoordinator;
 import io.vaultdatum.server.sync.PathChangeCoordinator;
@@ -36,6 +37,8 @@ public final class DatabaseInitializer {
 
     private final ContentHistory contentHistory;
 
+    private final ImplicitParentDirectories implicitParents;
+
     private final InitialVaultImport initialVaultImport;
 
     private final VaultIntegrityScan integrityScan;
@@ -50,6 +53,7 @@ public final class DatabaseInitializer {
             PathChangeCoordinator pathChangeCoordinator,
             DirectoryCoordinator directoryCoordinator,
             ContentHistory contentHistory,
+            ImplicitParentDirectories implicitParents,
             InitialVaultImport initialVaultImport,
             VaultIntegrityScan integrityScan) {
         this.dataDirectories = dataDirectories;
@@ -61,6 +65,7 @@ public final class DatabaseInitializer {
         this.pathChangeCoordinator = pathChangeCoordinator;
         this.directoryCoordinator = directoryCoordinator;
         this.contentHistory = contentHistory;
+        this.implicitParents = implicitParents;
         this.initialVaultImport = initialVaultImport;
         this.integrityScan = integrityScan;
     }
@@ -77,6 +82,7 @@ public final class DatabaseInitializer {
         directoryCoordinator.recoverPreparedDirectories();
         contentHistory.recoverCommittedArtifacts();
         contentHistory.collectExpired();
+        implicitParents.pruneLeftovers();
         initialVaultImport.runIfRequested();
         integrityScan.scan();
     }
