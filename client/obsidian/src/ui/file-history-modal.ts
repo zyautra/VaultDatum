@@ -1,4 +1,10 @@
-import { App, FuzzySuggestModal, Modal, Setting } from "obsidian";
+import {
+    App,
+    type ButtonComponent,
+    FuzzySuggestModal,
+    Modal,
+    Setting,
+} from "obsidian";
 
 import { createManualMergeDiff } from "../core/manual-merge-diff";
 import type {
@@ -41,7 +47,7 @@ export class FileHistoryModal extends Modal {
 
     private previewEl: HTMLElement | undefined;
 
-    private restoreButton: HTMLButtonElement | undefined;
+    private restoreButton: ButtonComponent | undefined;
 
     private previewUrl: string | undefined;
 
@@ -77,7 +83,7 @@ export class FileHistoryModal extends Modal {
                 button.setButtonText("Close").onClick(() => this.close()),
             )
             .addButton((button) => {
-                this.restoreButton = button.buttonEl;
+                this.restoreButton = button;
                 button
                     .setButtonText("Restore this version")
                     .setCta()
@@ -171,10 +177,7 @@ export class FileHistoryModal extends Modal {
     ): Promise<void> {
         this.selected = entry;
         this.renderList();
-        this.restoreButton?.toggleAttribute(
-            "disabled",
-            current || !isRestorable(entry),
-        );
+        this.restoreButton?.setDisabled(current || !isRestorable(entry));
 
         const preview = this.previewEl;
         if (preview === undefined) {
