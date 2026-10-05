@@ -554,6 +554,7 @@ components:
         - oldestRetainedRevision
         - protocolVersion
         - hashAlgorithm
+        - previousVaultIds
       properties:
         vaultId:
           $ref: "#/components/schemas/VaultId"
@@ -568,6 +569,16 @@ components:
         hashAlgorithm:
           type: string
           const: SHA-256
+        previousVaultIds:
+          type: array
+          description: >-
+            Vault IDs this Vault had before it was restored from a server
+            Backup, oldest first. A client bound to one of these IDs is
+            bound to this Vault before the restore and must bootstrap again;
+            its cursor and replica state must not be reused. Empty when the
+            Vault was never restored.
+          items:
+            $ref: "#/components/schemas/VaultId"
     RevisionAdvancedNotification:
       type: object
       additionalProperties: false

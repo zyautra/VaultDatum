@@ -7,6 +7,8 @@ import jakarta.ws.rs.Path;
 import jakarta.ws.rs.Produces;
 import jakarta.ws.rs.core.MediaType;
 
+import java.util.List;
+
 @Path("/api/v1/vault")
 @Produces(MediaType.APPLICATION_JSON)
 public final class VaultResource {
@@ -27,7 +29,8 @@ public final class VaultResource {
                 metadata.currentRevision(),
                 oldestRetainedRevision,
                 1,
-                "SHA-256");
+                "SHA-256",
+                vaultMetadataRepository.previousVaultIds());
     }
 
     public record VaultInfoResponse(
@@ -35,6 +38,7 @@ public final class VaultResource {
             long currentRevision,
             long oldestRetainedRevision,
             int protocolVersion,
-            String hashAlgorithm) {
+            String hashAlgorithm,
+            List<String> previousVaultIds) {
     }
 }

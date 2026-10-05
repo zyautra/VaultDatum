@@ -24,6 +24,7 @@ public final class DataDirectories {
         createDirectory(staging());
         createDirectory(recovery());
         createDirectory(history());
+        createDirectory(backups());
     }
 
     public Path root() {
@@ -52,6 +53,10 @@ public final class DataDirectories {
 
     public Path history() {
         return root.resolve("history");
+    }
+
+    public Path backups() {
+        return root.resolve("backups");
     }
 
     /**

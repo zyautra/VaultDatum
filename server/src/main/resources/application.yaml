@@ -3,6 +3,9 @@ vaultdatum:
   max-content-bytes: ${VAULTDATUM_MAX_CONTENT_BYTES:8388608}
   access-profile: ${VAULTDATUM_ACCESS_PROFILE:private-network}
   initial-import: ${VAULTDATUM_INITIAL_IMPORT:false}
+  restore-backup: ${VAULTDATUM_RESTORE_BACKUP:false}
+  backup:
+    interval-hours: ${VAULTDATUM_BACKUP_INTERVAL_HOURS:24}
   history:
     retention-days: ${VAULTDATUM_HISTORY_RETENTION_DAYS:90}
 
@@ -13,6 +16,8 @@ vaultdatum:
 "%test":
   vaultdatum:
     data-root: ${VAULTDATUM_DATA_ROOT:target/vaultdatum-test-data}
+    backup:
+      interval-hours: 0
 
 quarkus:
   application:

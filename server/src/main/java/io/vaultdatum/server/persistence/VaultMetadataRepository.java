@@ -1,11 +1,17 @@
 package io.vaultdatum.server.persistence;
 
+import static io.vaultdatum.server.jooq.Tables.MANIFEST;
+import static io.vaultdatum.server.jooq.Tables.MANIFEST_ENTRY;
+import static io.vaultdatum.server.jooq.Tables.PREVIOUS_VAULT;
 import static io.vaultdatum.server.jooq.Tables.VAULT_METADATA;
 
 import jakarta.enterprise.context.ApplicationScoped;
 import org.jooq.DSLContext;
 import org.jooq.impl.DSL;
 
+import java.time.Instant;
+import java.time.temporal.ChronoUnit;
+import java.util.List;
 import java.util.UUID;
 
 @ApplicationScoped
@@ -33,6 +39,46 @@ public final class VaultMetadataRepository {
                     .execute();
             return created;
         });
+    }
+
+    /**
+     * Gives a Vault restored from a Backup a new identity.
+     *
+     * <p>The restored journal reuses revision numbers that clients may already
+     * have seen under the old Vault ID. A new Vault ID makes those clients stop
+     * using their cursor; the old ID is kept so they can recognize the restored
+     * Vault. Manifests created under the old ID are discarded.</p>
+     */
+    public VaultMetadata replaceAfterRestore(String restoredBackupCreatedAt) {
+        return dsl.transactionResult(configuration -> {
+            DSLContext transaction = DSL.using(configuration);
+            VaultMetadata restored = current(transaction);
+            VaultMetadata replaced = new VaultMetadata("V-" + UUID.randomUUID(), restored.currentRevision());
+
+            transaction.insertInto(PREVIOUS_VAULT)
+                    .columns(PREVIOUS_VAULT.VAULT_ID, PREVIOUS_VAULT.REPLACED_AT,
+                            PREVIOUS_VAULT.RESTORED_BACKUP_CREATED_AT)
+                    .values(restored.vaultId(), Instant.now().truncatedTo(ChronoUnit.SECONDS).toString(),
+                            restoredBackupCreatedAt)
+                    .execute();
+            transaction.update(VAULT_METADATA)
+                    .set(VAULT_METADATA.VAULT_ID, replaced.vaultId())
+                    .where(VAULT_METADATA.ID.eq(1))
+                    .execute();
+            transaction.deleteFrom(MANIFEST_ENTRY).execute();
+            transaction.deleteFrom(MANIFEST).execute();
+            return replaced;
+        });
+    }
+
+    /**
+     * Returns the Vault IDs this Vault had before it was restored from a Backup, oldest first.
+     */
+    public List<String> previousVaultIds() {
+        return dsl.select(PREVIOUS_VAULT.VAULT_ID)
+                .from(PREVIOUS_VAULT)
+                .orderBy(PREVIOUS_VAULT.REPLACED_AT, PREVIOUS_VAULT.VAULT_ID)
+                .fetch(PREVIOUS_VAULT.VAULT_ID);
     }
 
     public VaultMetadata current() {
