@@ -1,0 +1,43 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  obsidian-plugin:
+    name: Obsidian plugin release
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: client/obsidian
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: client/obsidian/package-lock.json
+      - run: npm ci
+      - name: Require the plugin version to match the tag
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          test "$(node -p 'require("./manifest.json").version')" = "$version"
+          test "$(node -p 'require("./package.json").version')" = "$version"
+      - run: npm run build
+      - name: Publish main.js, manifest.json, and styles.css
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" main.js manifest.json styles.css --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" main.js manifest.json styles.css \
+              --verify-tag \
+              --title "$GITHUB_REF_NAME" \
+              --notes-from-tag
+          fi
