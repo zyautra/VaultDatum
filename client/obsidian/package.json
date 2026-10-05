@@ -19,7 +19,8 @@
     "test:remote-apply": "esbuild tests/remote-apply.test.ts --bundle --platform=node --format=esm --target=node24 --outfile=build/remote-apply.test.mjs && node build/remote-apply.test.mjs",
     "test:notifications": "esbuild tests/notification-channel.test.ts --bundle --platform=node --format=esm --target=node24 --outfile=build/notification-channel.test.mjs && node build/notification-channel.test.mjs",
     "test:sync-scheduler": "esbuild tests/sync-scheduler.test.ts --bundle --platform=node --format=esm --target=node24 --outfile=build/sync-scheduler.test.mjs && node build/sync-scheduler.test.mjs",
-    "test:file-restore": "esbuild tests/file-restore.test.ts --bundle --platform=node --format=esm --target=node24 --outfile=build/file-restore.test.mjs && node build/file-restore.test.mjs"
+    "test:file-restore": "esbuild tests/file-restore.test.ts --bundle --platform=node --format=esm --target=node24 --outfile=build/file-restore.test.mjs && node build/file-restore.test.mjs",
+    "test:e2e": "esbuild tests/e2e/backup-restore.e2e.ts --bundle --platform=node --format=esm --target=node24 --alias:obsidian=./tests/e2e/obsidian-shim.ts --outfile=build/backup-restore.e2e.mjs && node build/backup-restore.e2e.mjs"
   },
   "devDependencies": {
     "@eslint/js": "10.0.1",
