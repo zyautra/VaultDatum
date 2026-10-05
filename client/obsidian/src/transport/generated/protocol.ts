@@ -296,6 +296,8 @@ export interface components {
             protocolVersion: 1;
             /** @constant */
             hashAlgorithm: "SHA-256";
+            /** @description Vault IDs this Vault had before it was restored from a server Backup, oldest first. A client bound to one of these IDs is bound to this Vault before the restore and must bootstrap again; its cursor and replica state must not be reused. Empty when the Vault was never restored. */
+            previousVaultIds: components["schemas"]["VaultId"][];
         };
         RevisionAdvancedNotification: {
             /** @constant */

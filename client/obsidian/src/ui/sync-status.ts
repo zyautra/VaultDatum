@@ -37,6 +37,7 @@ export type OverviewAction =
     | "CONNECT"
     | "UPDATE_TOKEN"
     | "REVIEW_CONNECTION"
+    | "RECONNECT_RESTORED"
     | "RETRY"
     | "RESUME"
     | "REVIEW_CONFLICTS"
@@ -91,6 +92,9 @@ export function primaryOverviewAction(
         return "RETRY";
     }
     if (status.kind === "ERROR") {
+        if (status.summary?.vaultRestored === true) {
+            return "RECONNECT_RESTORED";
+        }
         return status.summary?.vaultMismatch === true
             ? "REVIEW_CONNECTION"
             : "RETRY";
@@ -110,6 +114,9 @@ export function primaryOverviewActionLabel(action: OverviewAction): string {
     }
     if (action === "REVIEW_CONNECTION") {
         return "Review connection";
+    }
+    if (action === "RECONNECT_RESTORED") {
+        return "Reconnect to restored Vault";
     }
     if (action === "RESUME") {
         return "Resume sync";
@@ -134,6 +141,9 @@ export function connectionOverviewDescription(overview: SyncOverview): string {
         return "Saved — update this Vault's access token to continue.";
     }
     if (overview.status.kind === "ERROR") {
+        if (overview.status.summary?.vaultRestored === true) {
+            return "Saved — the server Vault was restored. Reconnect to continue.";
+        }
         return overview.status.summary?.vaultMismatch === true
             ? "Saved — this server belongs to a different Vault."
             : "Saved — the last server check did not complete.";
@@ -194,6 +204,9 @@ export function describeSyncResult(status: SyncStatus): string {
         return "This Vault requires a valid access token. Pending work remains on this device.";
     }
     if (status.kind === "ERROR") {
+        if (status.summary?.vaultRestored === true) {
+            return "The server Vault was restored from a backup; no changes were sent. Run Reconnect to restored server Vault.";
+        }
         return status.summary?.vaultMismatch === true
             ? "The selected server belongs to a different Vault; no changes were sent."
             : "The last synchronization did not complete. Pending work remains on this device.";
@@ -310,6 +323,9 @@ export function syncStatusLabel(status: SyncStatus): string {
             : `VaultDatum: Review conflict${count === 1 ? "" : "s"} (${count})`;
     }
     if (status.kind === "ERROR") {
+        if (status.summary?.vaultRestored === true) {
+            return "VaultDatum: Server restored";
+        }
         return status.summary?.vaultMismatch
             ? "VaultDatum: Different Vault"
             : "VaultDatum: Error";
@@ -352,6 +368,9 @@ export function syncStatusDescription(status: SyncStatus): string {
         return `Some paths need conflict resolution before they can converge.${lastSuccess}`;
     }
     if (status.kind === "ERROR") {
+        if (status.summary?.vaultRestored === true) {
+            return "The server Vault was restored from a backup. Run Reconnect to restored server Vault to continue. Existing changes were not sent.";
+        }
         if (status.summary?.vaultMismatch) {
             return "This Server belongs to a different Vault. Existing changes were not sent.";
         }

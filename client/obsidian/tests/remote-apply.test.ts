@@ -2037,6 +2037,101 @@ async function resumesAnInterruptedManualMerge(): Promise<void> {
     store.close();
 }
 
+async function reconnectsToARestoredVaultWithoutChangingLocalFiles(): Promise<void> {
+    const path = "notes/restored.md";
+    const createdAfterBackup = "notes/after-backup.md";
+    const snapshotContent = bytes("Content kept in the server Backup");
+    const store = await ClientStore.open(
+        `test-restored-vault-${crypto.randomUUID()}`,
+    );
+    const vault = new MemoryVault();
+    await new CreateSync(
+        store,
+        new ManifestTransport(path, snapshotContent),
+        vault,
+        () => "https://vaultdatum.test",
+    ).sync();
+    await vault.writeFile(createdAfterBackup, bytes("Written after backup"));
+    const restored = new CreateSync(
+        store,
+        new RestoredManifestTransport(path, snapshotContent, [
+            "V-manifest-test",
+        ]),
+        vault,
+        () => "https://vaultdatum.test",
+    );
+
+    const stopped = await restored.sync();
+
+    assert.equal(stopped.vaultMismatch, true);
+    assert.equal(stopped.vaultRestored, true);
+    assert.equal((await store.syncState()).vaultId, "V-manifest-test");
+
+    assert.deepEqual(await restored.reconnectToRestoredVault(), {
+        kind: "RECONNECTED",
+    });
+    assert.deepEqual(await store.syncState(), {
+        vaultId: "V-restored",
+        serverCursor: 0,
+    });
+    assert.deepEqual(await store.replicas(), []);
+    assert.equal(await store.isInitialBootstrapComplete(), false);
+    assert.equal(await vault.hash(path), await contentHash(snapshotContent));
+
+    const bootstrapped = await restored.sync();
+
+    assert.equal(bootstrapped.vaultMismatch, false);
+    assert.equal(bootstrapped.conflicted, 0);
+    assert.equal(
+        (await store.replica(path))?.contentHash,
+        await contentHash(snapshotContent),
+    );
+    assert.deepEqual(
+        (await store.pendingOperations()).map((pending) => [
+            pending.type,
+            pending.path,
+        ]),
+        [["CREATE", createdAfterBackup]],
+    );
+    assert.equal(
+        await vault.hash(createdAfterBackup),
+        await contentHash(bytes("Written after backup")),
+    );
+    store.close();
+}
+
+async function doesNotReconnectToAnUnrelatedVault(): Promise<void> {
+    const path = "notes/unrelated.md";
+    const content = bytes("Bound to another Vault");
+    const store = await ClientStore.open(
+        `test-unrelated-vault-${crypto.randomUUID()}`,
+    );
+    const vault = new MemoryVault();
+    await new CreateSync(
+        store,
+        new ManifestTransport(path, content),
+        vault,
+        () => "https://vaultdatum.test",
+    ).sync();
+    const unrelated = new CreateSync(
+        store,
+        new RestoredManifestTransport(path, content, ["V-someone-else"]),
+        vault,
+        () => "https://vaultdatum.test",
+    );
+
+    const stopped = await unrelated.sync();
+
+    assert.equal(stopped.vaultMismatch, true);
+    assert.equal(stopped.vaultRestored, false);
+    assert.deepEqual(await unrelated.reconnectToRestoredVault(), {
+        kind: "NOT_RESTORED",
+    });
+    assert.equal((await store.syncState()).vaultId, "V-manifest-test");
+    assert.notEqual(await store.replica(path), undefined);
+    store.close();
+}
+
 class DownloadTransport implements ContentTransport {
     public constructor(private readonly content: ArrayBuffer) {}
 
@@ -2208,6 +2303,7 @@ class HistoryTransport extends DownloadTransport implements SyncTransport {
                 oldestRetainedRevision: 0,
                 protocolVersion: 1,
                 hashAlgorithm: "SHA-256",
+                previousVaultIds: [],
             },
         };
     }
@@ -2425,6 +2521,7 @@ class ManifestTransport extends NoopTransport {
                 oldestRetainedRevision: 0,
                 protocolVersion: 1,
                 hashAlgorithm: "SHA-256",
+                previousVaultIds: [],
             },
         };
     }
@@ -2531,6 +2628,69 @@ class ManifestTransport extends NoopTransport {
     }
 }
 
+/**
+ * Serves the same content as {@link ManifestTransport} under a new Vault ID,
+ * as a server restored from a Backup does.
+ */
+class RestoredManifestTransport extends ManifestTransport {
+    public constructor(
+        path: string,
+        snapshotContent: ArrayBuffer,
+        private readonly previousVaultIds: readonly string[],
+    ) {
+        super(path, snapshotContent);
+    }
+
+    public override async readVault(
+        serverUrl: string,
+    ): Promise<ReadResult<RemoteVaultInfo>> {
+        const vault = await super.readVault(serverUrl);
+        return vault.kind === "OK"
+            ? {
+                  kind: "OK",
+                  value: {
+                      ...vault.value,
+                      vaultId: "V-restored",
+                      previousVaultIds: this.previousVaultIds,
+                  },
+              }
+            : vault;
+    }
+
+    public override async createManifest(
+        serverUrl: string,
+    ): Promise<ReadResult<RemoteManifestCreated>> {
+        const created = await super.createManifest(serverUrl);
+        return created.kind === "OK"
+            ? { kind: "OK", value: { ...created.value, vaultId: "V-restored" } }
+            : created;
+    }
+
+    public override async readManifest(
+        serverUrl: string,
+        manifestId: string,
+    ): Promise<ReadResult<RemoteManifest>> {
+        const manifest = await super.readManifest(serverUrl, manifestId);
+        return manifest.kind === "OK"
+            ? {
+                  kind: "OK",
+                  value: { ...manifest.value, vaultId: "V-restored" },
+              }
+            : manifest;
+    }
+
+    public override async listChanges(
+        serverUrl: string,
+        after: number,
+        limit: number,
+    ): Promise<ReadResult<RemoteChangePage>> {
+        const page = await super.listChanges(serverUrl, after, limit);
+        return page.kind === "OK"
+            ? { kind: "OK", value: { ...page.value, vaultId: "V-restored" } }
+            : page;
+    }
+}
+
 class FullReconciliationTransport extends NoopTransport {
     public constructor(
         private readonly currentRevision: number,
@@ -2554,6 +2714,7 @@ class FullReconciliationTransport extends NoopTransport {
                 oldestRetainedRevision: 0,
                 protocolVersion: 1,
                 hashAlgorithm: "SHA-256",
+                previousVaultIds: [],
             },
         };
     }
@@ -2662,6 +2823,7 @@ class RetryingTransport extends NoopTransport {
                 oldestRetainedRevision: 0,
                 protocolVersion: 1,
                 hashAlgorithm: "SHA-256",
+                previousVaultIds: [],
             },
         };
     }
@@ -3025,3 +3187,5 @@ await explicitlyResolvesACreateConflictByKeepingBothFiles();
 await resumesAnInterruptedKeepBothResolution();
 await manuallyMergesAMarkdownConflict();
 await resumesAnInterruptedManualMerge();
+await reconnectsToARestoredVaultWithoutChangingLocalFiles();
+await doesNotReconnectToAnUnrelatedVault();

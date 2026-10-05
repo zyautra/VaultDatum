@@ -38,9 +38,17 @@ export interface SyncSummary {
     readonly oversized: number;
     readonly offline: boolean;
     readonly vaultMismatch: boolean;
+    /** The server Vault was restored from a Backup of this client's Vault. */
+    readonly vaultRestored?: boolean;
     readonly authenticationRequired?: boolean;
     readonly initialBootstrap?: boolean;
 }
+
+export type RestoredVaultReconnect =
+    | { readonly kind: "RECONNECTED" }
+    | { readonly kind: "NOT_RESTORED" }
+    | { readonly kind: "UNAVAILABLE" }
+    | { readonly kind: "BUSY" };
 
 export type SyncProgressPhase =
     | "CHECKING_SERVER_VAULT"
@@ -385,6 +393,37 @@ export class CreateSync {
         return this.remoteApply.resolveManualMerge(path, mergedContent);
     }
 
+    /**
+     * Binds this client to a server Vault that was restored from a Backup of
+     * the Vault this client was bound to. Local files are kept; the next
+     * synchronization runs the Initial Bootstrap against the restored Vault.
+     */
+    public async reconnectToRestoredVault(): Promise<RestoredVaultReconnect> {
+        if (this.activeSync !== undefined) {
+            return { kind: "BUSY" };
+        }
+        const serverUrl = this.serverUrl();
+        if (serverUrl.length === 0) {
+            return { kind: "UNAVAILABLE" };
+        }
+
+        const vault = await this.serverClient.readVault(serverUrl);
+        if (vault.kind !== "OK") {
+            return { kind: "UNAVAILABLE" };
+        }
+        const boundVaultId = (await this.store.syncState()).vaultId;
+        if (
+            boundVaultId === undefined ||
+            !vault.value.previousVaultIds.includes(boundVaultId)
+        ) {
+            return { kind: "NOT_RESTORED" };
+        }
+
+        await this.remoteApply.preserveLocalRecoveryContent();
+        await this.store.rebindToRestoredVault(vault.value.vaultId);
+        return { kind: "RECONNECTED" };
+    }
+
     private async captureContent(
         path: string,
         content: ArrayBuffer,
@@ -631,6 +670,7 @@ export class CreateSync {
                     oversized,
                     offline: false,
                     vaultMismatch: true,
+                    vaultRestored: error.restored,
                 };
             }
             if (error instanceof ServerAuthenticationError) {
@@ -817,7 +857,10 @@ export class CreateSync {
             };
         }
 
-        const state = await this.store.confirmVault(vault.value.vaultId);
+        const state = await this.store.confirmVault(
+            vault.value.vaultId,
+            vault.value.previousVaultIds,
+        );
         const created = await this.serverClient.createManifest(serverUrl);
         if (created.kind !== "OK") {
             return {
@@ -890,7 +933,10 @@ export class CreateSync {
             };
         }
 
-        let state = await this.store.confirmVault(vault.value.vaultId);
+        let state = await this.store.confirmVault(
+            vault.value.vaultId,
+            vault.value.previousVaultIds,
+        );
         let conflicted = 0;
 
         if (

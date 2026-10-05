@@ -23,6 +23,7 @@ export interface RemoteVaultInfo {
     readonly oldestRetainedRevision: number;
     readonly protocolVersion: 1;
     readonly hashAlgorithm: "SHA-256";
+    readonly previousVaultIds: readonly string[];
 }
 
 export interface RemoteChangePage {
@@ -799,12 +800,22 @@ function vaultInfo(content: string): RemoteVaultInfo | undefined {
         return undefined;
     }
 
+    // Servers before backup support do not send previousVaultIds.
+    const previousVaultIds: unknown = parsed.previousVaultIds ?? [];
+    if (
+        !Array.isArray(previousVaultIds) ||
+        !previousVaultIds.every((vaultId) => typeof vaultId === "string")
+    ) {
+        return undefined;
+    }
+
     return {
         vaultId: parsed.vaultId,
         currentRevision: parsed.currentRevision,
         oldestRetainedRevision: parsed.oldestRetainedRevision,
         protocolVersion: 1,
         hashAlgorithm: "SHA-256",
+        previousVaultIds,
     };
 }
 

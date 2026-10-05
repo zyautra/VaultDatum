@@ -404,6 +404,9 @@ export class VaultDatumSettingTab extends PluginSettingTab {
             case "UPDATE_TOKEN":
                 this.vaultAccessTokenInput?.focus();
                 return;
+            case "RECONNECT_RESTORED":
+                await this.plugin.requestReconnectRestoredVault();
+                return;
             case "RESUME":
                 await this.plugin.setSyncEnabled(true);
                 this.refreshOverview();
@@ -537,6 +540,57 @@ export class ResetSyncTrackingModal extends Modal {
                         }
                         this.confirmed = true;
                         void this.confirmReset().then(() => this.close());
+                    }),
+            );
+    }
+
+    public onClose(): void {
+        this.contentEl.empty();
+    }
+}
+
+export class ReconnectRestoredVaultModal extends Modal {
+    private confirmed = false;
+
+    public constructor(
+        app: App,
+        private readonly pendingCount: number,
+        private readonly conflictCount: number,
+        private readonly confirmReconnect: () => Promise<void>,
+    ) {
+        super(app);
+    }
+
+    public onOpen(): void {
+        this.setTitle("Reconnect to restored server Vault?");
+        this.contentEl.createEl("p", {
+            text: "The server Vault was restored from a backup. This device's sync tracking belongs to the Vault before the restore and will be rebuilt.",
+        });
+        this.contentEl.createEl("p", {
+            text: "Your local files are not changed. Files created or edited after the backup are sent again or kept as conflicts; nothing is overwritten.",
+        });
+        this.contentEl.createEl("p", {
+            text: "Files deleted after the backup come back from the server. A rename that was not sent yet may leave both the old and the new file.",
+        });
+        if (this.pendingCount > 0 || this.conflictCount > 0) {
+            this.contentEl.createEl("p", {
+                text: `${this.pendingCount} pending change(s) and ${this.conflictCount} conflict(s) recorded for the previous Vault will be classified again from your local files.`,
+            });
+        }
+        new Setting(this.contentEl)
+            .addButton((button) =>
+                button.setButtonText("Cancel").onClick(() => this.close()),
+            )
+            .addButton((button) =>
+                button
+                    .setButtonText("Reconnect")
+                    .setWarning()
+                    .onClick(() => {
+                        if (this.confirmed) {
+                            return;
+                        }
+                        this.confirmed = true;
+                        void this.confirmReconnect().then(() => this.close());
                     }),
             );
     }

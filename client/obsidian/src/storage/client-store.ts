@@ -128,10 +128,23 @@ export interface ManualMergeResolution {
 }
 
 export class VaultMismatchError extends Error {
-    public constructor(expectedVaultId: string, actualVaultId: string) {
+    /**
+     * Whether the server Vault was restored from a Backup of the Vault this
+     * sync state belongs to.
+     */
+    public readonly restored: boolean;
+
+    public constructor(
+        expectedVaultId: string,
+        actualVaultId: string,
+        restored: boolean,
+    ) {
         super(
-            `VaultDatum sync state belongs to ${expectedVaultId}, not ${actualVaultId}.`,
+            restored
+                ? `VaultDatum sync state belongs to ${expectedVaultId}, which the server restored as ${actualVaultId}.`
+                : `VaultDatum sync state belongs to ${expectedVaultId}, not ${actualVaultId}.`,
         );
+        this.restored = restored;
     }
 }
 
@@ -239,11 +252,18 @@ export class ClientStore {
         return { serverCursor: 0 };
     }
 
-    public async confirmVault(vaultId: string): Promise<ClientSyncState> {
+    public async confirmVault(
+        vaultId: string,
+        previousVaultIds: readonly string[] = [],
+    ): Promise<ClientSyncState> {
         const state = await this.syncState();
 
         if (state.vaultId !== undefined && state.vaultId !== vaultId) {
-            throw new VaultMismatchError(state.vaultId, vaultId);
+            throw new VaultMismatchError(
+                state.vaultId,
+                vaultId,
+                previousVaultIds.includes(state.vaultId),
+            );
         }
         if (state.vaultId === vaultId) {
             return state;
@@ -456,6 +476,48 @@ export class ClientStore {
         metadata.delete("local-scan-initialized");
         metadata.delete("initial-bootstrap");
         metadata.delete("sync-ui");
+        transaction.objectStore(PENDING_STORE).clear();
+        transaction.objectStore(ARTIFACT_STORE).clear();
+        transaction.objectStore(REPLICA_STORE).clear();
+        transaction.objectStore(LOCAL_SCAN_STORE).clear();
+        transaction.objectStore(APPLY_STORE).clear();
+        transaction.objectStore(CONFLICT_STORE).clear();
+        transaction.objectStore(KEEP_BOTH_STORE).clear();
+        transaction.objectStore(MANUAL_MERGE_STORE).clear();
+        await transactionDone(transaction);
+    }
+
+    /**
+     * Binds this sync state to a server Vault restored from a Backup.
+     *
+     * The restored journal reuses revisions this client may already have
+     * seen, so every cursor, replica entry, pending operation, and conflict
+     * recorded for the previous Vault ID is discarded. Local files are not
+     * changed; the next synchronization classifies them again through the
+     * Initial Bootstrap.
+     */
+    public async rebindToRestoredVault(vaultId: string): Promise<void> {
+        const transaction = this.database.transaction(
+            [
+                METADATA_STORE,
+                PENDING_STORE,
+                ARTIFACT_STORE,
+                REPLICA_STORE,
+                LOCAL_SCAN_STORE,
+                APPLY_STORE,
+                CONFLICT_STORE,
+                KEEP_BOTH_STORE,
+                MANUAL_MERGE_STORE,
+            ],
+            "readwrite",
+        );
+        const metadata = transaction.objectStore(METADATA_STORE);
+        metadata.delete("local-scan-initialized");
+        metadata.delete("initial-bootstrap");
+        metadata.put({
+            key: "sync-state",
+            value: { vaultId, serverCursor: 0 },
+        } satisfies SyncStateMetadata);
         transaction.objectStore(PENDING_STORE).clear();
         transaction.objectStore(ARTIFACT_STORE).clear();
         transaction.objectStore(REPLICA_STORE).clear();

@@ -49,6 +49,7 @@ import {
 import { ManualMergeModal } from "./ui/manual-merge-modal";
 import {
     VaultDatumSettingTab,
+    ReconnectRestoredVaultModal,
     ResetSyncTrackingModal,
 } from "./ui/settings-tab";
 
@@ -212,6 +213,13 @@ export default class VaultDatumPlugin extends Plugin {
                     void this.setSyncEnabled(true);
                 }
                 return true;
+            },
+        });
+        this.addCommand({
+            id: "reconnect-restored-vault",
+            name: "Reconnect to restored server Vault",
+            callback: () => {
+                void this.requestReconnectRestoredVault();
             },
         });
         this.addCommand({
@@ -526,6 +534,77 @@ export default class VaultDatumPlugin extends Plugin {
 
         this.notificationChannel?.stop();
         this.syncScheduler?.refreshAvailability();
+    }
+
+    public async requestReconnectRestoredVault(): Promise<void> {
+        const store = this.store;
+        const scheduler = this.syncScheduler;
+        if (store === undefined || scheduler === undefined) {
+            return;
+        }
+        if (this.syncStatus?.summary?.vaultRestored !== true) {
+            new Notice(
+                "VaultDatum has not detected a restored server Vault. Run Sync now first.",
+            );
+            return;
+        }
+        if (scheduler.isBusy()) {
+            new Notice(
+                "Wait for the current synchronization to finish before reconnecting.",
+            );
+            return;
+        }
+
+        await this.captureQueue;
+        const eligibility = await store.resetEligibility();
+        new ReconnectRestoredVaultModal(
+            this.app,
+            eligibility.pendingCount,
+            eligibility.conflictCount,
+            async () => {
+                await this.reconnectRestoredVault();
+            },
+        ).open();
+    }
+
+    private async reconnectRestoredVault(): Promise<void> {
+        const createSync = this.createSync;
+        const scheduler = this.syncScheduler;
+        if (createSync === undefined || scheduler === undefined) {
+            return;
+        }
+
+        this.resetInProgress = true;
+        this.notificationChannel?.stop();
+        scheduler.refreshAvailability();
+        let reconnected = false;
+        try {
+            await this.captureQueue;
+            const outcome = await createSync.reconnectToRestoredVault();
+            reconnected = outcome.kind === "RECONNECTED";
+            new Notice(reconnectOutcomeMessage(outcome.kind));
+        } catch (error: unknown) {
+            console.warn(
+                "VaultDatum could not reconnect to the restored Vault",
+                error,
+            );
+            new Notice(
+                "VaultDatum could not reconnect to the restored Vault. Your files were not changed.",
+            );
+        } finally {
+            this.resetInProgress = false;
+        }
+
+        if (reconnected) {
+            this.lastPersistedSuccessfulAt = undefined;
+        }
+        if (this.syncSettings.syncEnabled) {
+            this.notificationChannel?.restart();
+            scheduler.refreshAvailability();
+            void this.syncNow(false);
+        } else {
+            scheduler.refreshAvailability();
+        }
     }
 
     public async requestResetSyncTracking(): Promise<void> {
@@ -1412,6 +1491,12 @@ export default class VaultDatumPlugin extends Plugin {
     }
 
     private showSyncResult(summary: SyncSummary): void {
+        if (summary.vaultRestored === true) {
+            new Notice(
+                'VaultDatum stopped because the server Vault was restored from a backup. Run "Reconnect to restored server Vault" to continue.',
+            );
+            return;
+        }
         if (summary.vaultMismatch) {
             new Notice(
                 "VaultDatum stopped because this local sync state belongs to another server Vault.",
@@ -1581,5 +1666,20 @@ function restoreOutcomeMessage(path: string, outcome: RestoreOutcome): string {
                 case "ALREADY_CURRENT":
                     return "That is already the current version.";
             }
+    }
+}
+
+function reconnectOutcomeMessage(
+    kind: "RECONNECTED" | "NOT_RESTORED" | "UNAVAILABLE" | "BUSY",
+): string {
+    switch (kind) {
+        case "RECONNECTED":
+            return "VaultDatum reconnected to the restored server Vault. Your files were not changed; they will be compared with the server now.";
+        case "NOT_RESTORED":
+            return "The server Vault was not restored from this device's Vault. Sync tracking was not changed.";
+        case "UNAVAILABLE":
+            return "The server is unavailable. Try reconnecting again later.";
+        case "BUSY":
+            return "Wait for the current synchronization to finish before reconnecting.";
     }
 }

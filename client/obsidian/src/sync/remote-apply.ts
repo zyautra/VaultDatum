@@ -530,6 +530,29 @@ export class RemoteApply {
         }
     }
 
+    /**
+     * Writes content that interrupted conflict resolutions hold only in sync
+     * state to local files, so discarding that state loses no local work.
+     */
+    public async preserveLocalRecoveryContent(): Promise<void> {
+        await this.recoverManualMergeResolutions();
+        for (const resolution of await this.store.keepBothResolutions()) {
+            const artifact = await this.store.artifact(
+                resolution.pending.artifactId,
+            );
+            if (
+                artifact !== undefined &&
+                (await this.localVault.readFile(resolution.pending.path)) ===
+                    undefined
+            ) {
+                await this.localVault.writeFile(
+                    resolution.pending.path,
+                    await artifact.arrayBuffer(),
+                );
+            }
+        }
+    }
+
     public async resolveApplyLocal(path: string): Promise<boolean> {
         if ((await this.store.conflict(path)) === undefined) {
             return false;

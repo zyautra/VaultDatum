@@ -238,6 +238,28 @@ lists each rejected path as `initial_import_rejected`, and nothing is recorded.
 Once `initial_import_complete` is logged, unset the flag and restart. The server
 refuses to start with the flag set after the journal has any change.
 
+### Server Backup and Restore
+
+The server keeps one Backup of its last healthy state in `backups/current/` of
+the data root: the Vault, `sync.db`, and the Content History at one consistent
+revision. Vault files are hard-linked, so a Backup only costs the space of
+files changed since the previous one. The Backup is refreshed every
+`VAULTDATUM_BACKUP_INTERVAL_HOURS` (default `24`, `0` disables) and always
+before a schema migration. A refresh is skipped with `backup_skipped` instead of
+replacing the Backup when recorded Vault files are missing or have a different
+size, the revision went backwards, or the database belongs to another Vault.
+
+To restore, stop the server and start it once with
+`VAULTDATUM_RESTORE_BACKUP=true`. The current state is moved to
+`backups/pre-restore-<time>/`, the Backup is put in place, and the restored
+Vault gets a new Vault ID; the previous ID is reported in `previousVaultIds` of
+`GET /api/v1/vault`. Check `restore_complete` and `drifts=0` in the log, unset
+the flag, and restart. Each device then runs **Reconnect to restored server
+Vault**; local files are kept and compared again with the restored Vault.
+
+The Backup lives on the same disk as the Vault. Copy `backups/current/`
+elsewhere, for example with `rsync -aH`, to survive a disk loss.
+
 ## Deploy on Kubernetes
 
 `deploy/kubernetes/base` is portable: it makes no assumptions about a
