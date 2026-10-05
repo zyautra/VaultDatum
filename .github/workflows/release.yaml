@@ -23,6 +23,8 @@ jobs:
           cache: npm
           cache-dependency-path: client/obsidian/package-lock.json
       - run: npm ci
+      - name: Fetch the annotated tag for the release notes
+        run: git fetch --force origin "refs/tags/$GITHUB_REF_NAME:refs/tags/$GITHUB_REF_NAME"
       - name: Require the plugin version to match the tag
         run: |
           version="${GITHUB_REF_NAME#v}"
